@@ -38,6 +38,20 @@ struct BlockGroupDescriptor{
     uint32_t bg_reserved[3]; // Reservado para o futuro
 }typedef bgd;
 
+struct Inode {
+    uint16_t i_mode; // Tipo e permissopes
+    uint16_t i_uid; // Id do Dono
+    uint32_t i_size; // Tamanho em Bytes
+    uint32_t i_atime; // Tempo do acesso
+    uint32_t i_ctime; // Tempo de criação
+    uint32_t i_mtime; // Tempo de modificação
+    uint32_t i_dtime; // tempo de deleção
+    uint16_t i_gid; // id do grupo
+    uint16_t i_links_count; // Quantos links esse inode possui
+    uint32_t i_blocks; // Quantidade de blocos alocados para esse inode
+    uint32_t i_block[15]; // Ponteiros para os blocos alocados
+} typedef inode;
+
 #pragma pack(pop)
 
 
