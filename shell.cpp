@@ -25,10 +25,18 @@ struct Superblock{
     uint16_t s_mnt_count; // Quantidade de vezes que o sistema foi montado desde a ultima vez que foi verificado
     uint16_t s_max_mnt_count; // Quantidade maxima de vezes que o sistema pode ser montado antes de ser totalmente verificado
     uint16_t s_magic; // Numero magico que define o sistema de arquivos como Ext2
-    
-
 } typedef superblock;
 
+struct BlockGroupDescriptor{
+    uint32_t bg_block_bitmap; // Id do bloco do primeiro bloco do bloco de bitmaps
+    uint32_t bg_inode_bitmap; // Id do bloco do primeiro bloco do INODE de bitmap
+    uint32_t bg_inode_table; // Id do bloco do primeiro bloco da tabela de INODE
+    uint16_t bg_free_blocks_count; // Total de blocos livres
+    uint16_t bg_free_inodes_count; // Total de INODES livres
+    uint16_t bg_used_dirs_count; // Total de INODES alocadas para diretorios 
+    uint16_t bg_pad; // Padding
+    uint32_t bg_reserved[3]; // Reservado para o futuro
+}typedef bgd;
 
 #pragma pack(pop)
 
