@@ -1686,6 +1686,278 @@ void comando_mkdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *
            path_alvo, novo_dir_inode_num, novo_dir_data_block_num);
 }
 
+// Função para desalocar um inode.
+// Limpa o bit no bitmap de inodes e atualiza contagens.
+void deallocate_inode(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt, uint32_t inode_num) {
+    if (inode_num == 0 || inode_num == EXT2_ROOT_INO) { // Não desalocar inode 0 ou raiz
+        fprintf(stderr, "deallocate_inode: Tentativa de desalocar inode inválido ou raiz (%u).\n", inode_num);
+        return;
+    }
+    unsigned int group_idx = (inode_num - 1) / sb->s_inodes_per_group;
+    unsigned int bit_in_group = (inode_num - 1) % sb->s_inodes_per_group;
+    unsigned char inode_bitmap_buffer[BLOCK_SIZE_FIXED];
+
+    if (group_idx >= ((sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group)) {
+        fprintf(stderr, "deallocate_inode: Índice de grupo inválido %u para inode %u.\n", group_idx, inode_num);
+        return;
+    }
+
+    // Ler o bitmap de inodes do grupo
+    if (read_data_block(fd, bgdt[group_idx].bg_inode_bitmap, (char*)inode_bitmap_buffer) != 0) {
+        fprintf(stderr, "deallocate_inode: Erro ao ler bitmap de inodes do grupo %u.\n", group_idx);
+        return; // Não podemos prosseguir sem o bitmap
+    }
+
+    if (!is_bit_set(inode_bitmap_buffer, bit_in_group)) {
+        fprintf(stderr, "deallocate_inode: Inode %u (bit %u no grupo %u) já está livre.\n", inode_num, bit_in_group, group_idx);
+        // Mesmo que já esteja livre, é bom garantir que as contagens estejam corretas se possível,
+        // mas a operação principal é limpar o bit, se já limpo, não há muito a fazer.
+        // Considerar isso um aviso e não um erro fatal para a desalocação geral.
+    } else {
+        clear_bit(inode_bitmap_buffer, bit_in_group);
+        if (write_data_block(fd, bgdt[group_idx].bg_inode_bitmap, (char*)inode_bitmap_buffer) != 0) {
+            fprintf(stderr, "deallocate_inode: Erro ao escrever bitmap de inodes atualizado para grupo %u.\n", group_idx);
+            // Falha crítica, o bitmap está inconsistente com as contagens que vamos atualizar.
+            return; 
+        }
+        sb->s_free_inodes_count++;
+        bgdt[group_idx].bg_free_inodes_count++;
+        // bgdt[group_idx].bg_used_dirs_count deve ser decrementado se o inode era de um diretório (feito em rmdir)
+
+        if (write_superblock(fd, sb) != 0) {
+            fprintf(stderr, "deallocate_inode: Erro ao escrever superbloco.\n");
+        }
+        if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
+            fprintf(stderr, "deallocate_inode: Erro ao escrever descritor de grupo %u.\n", group_idx);
+        }
+        // printf("Debug deallocate_inode: Inode %u (grupo %u, bit %u) desalocado.\n", inode_num, group_idx, bit_in_group);
+    }
+}
+
+// Função para desalocar um bloco de dados.
+// Limpa o bit no bitmap de blocos e atualiza contagens.
+void deallocate_data_block(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt, uint32_t block_num) {
+    if (block_num == 0) { // Bloco 0 não é gerenciado por bitmaps de dados
+        fprintf(stderr, "deallocate_data_block: Tentativa de desalocar bloco de dados 0.\n");
+        return;
+    }
+    // Calcular a qual grupo o bloco pertence e qual bit dentro do bitmap do grupo
+    unsigned int group_idx = (block_num - sb->s_first_data_block) / sb->s_blocks_per_group;
+    unsigned int bit_in_group = (block_num - sb->s_first_data_block) % sb->s_blocks_per_group;
+    unsigned char block_bitmap_buffer[BLOCK_SIZE_FIXED];
+
+    if (group_idx >= ((sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group)) {
+        fprintf(stderr, "deallocate_data_block: Índice de grupo inválido %u para bloco %u.\n", group_idx, block_num);
+        return;
+    }
+    
+    // Ler o bitmap de blocos do grupo
+    if (read_data_block(fd, bgdt[group_idx].bg_block_bitmap, (char*)block_bitmap_buffer) != 0) {
+        fprintf(stderr, "deallocate_data_block: Erro ao ler bitmap de blocos do grupo %u.\n", group_idx);
+        return;
+    }
+
+    if (!is_bit_set(block_bitmap_buffer, bit_in_group)) {
+        fprintf(stderr, "deallocate_data_block: Bloco %u (bit %u no grupo %u) já está livre.\n", block_num, bit_in_group, group_idx);
+    } else {
+        clear_bit(block_bitmap_buffer, bit_in_group);
+        if (write_data_block(fd, bgdt[group_idx].bg_block_bitmap, (char*)block_bitmap_buffer) != 0) {
+            fprintf(stderr, "deallocate_data_block: Erro ao escrever bitmap de blocos atualizado para grupo %u.\n", group_idx);
+            return;
+        }
+        sb->s_free_blocks_count++;
+        bgdt[group_idx].bg_free_blocks_count++;
+
+        if (write_superblock(fd, sb) != 0) {
+            fprintf(stderr, "deallocate_data_block: Erro ao escrever superbloco.\n");
+        }
+        if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
+            fprintf(stderr, "deallocate_data_block: Erro ao escrever descritor de grupo %u.\n", group_idx);
+        }
+        // printf("Debug deallocate_data_block: Bloco %u (grupo %u, bit %u) desalocado.\n", block_num, group_idx, bit_in_group);
+    }
+}
+
+// Função para o comando 'rm' (remove arquivo)
+void comando_rm(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                uint32_t diretorio_atual_inode_num, const char* path_alvo) {
+
+    if (path_alvo == NULL || strlen(path_alvo) == 0) {
+        printf("rm: Operando faltando\n");
+        return;
+    }
+
+    char nome_arquivo[EXT2_NAME_LEN + 1];
+    char caminho_pai_str[1024];
+    uint32_t inode_pai_num;
+
+    // 1. Analisar path_alvo
+    const char *ultimo_slash = strrchr(path_alvo, '/');
+    if (ultimo_slash != NULL) {
+        size_t len_caminho_pai = ultimo_slash - path_alvo;
+        if (len_caminho_pai == 0) { strcpy(caminho_pai_str, "/"); }
+        else { strncpy(caminho_pai_str, path_alvo, len_caminho_pai); caminho_pai_str[len_caminho_pai] = '\0'; }
+        strncpy(nome_arquivo, ultimo_slash + 1, EXT2_NAME_LEN); nome_arquivo[EXT2_NAME_LEN] = '\0';
+    } else {
+        strcpy(caminho_pai_str, "."); // Relativo ao diretório atual
+        strncpy(nome_arquivo, path_alvo, EXT2_NAME_LEN); nome_arquivo[EXT2_NAME_LEN] = '\0';
+    }
+    if (strlen(nome_arquivo) == 0 || strcmp(nome_arquivo, ".") == 0 || strcmp(nome_arquivo, "..") == 0) {
+        printf("rm: não é possível remover '%s': Nome de arquivo inválido\n", nome_arquivo);
+        return;
+    }
+
+    // 2. Resolver inode do diretório pai
+    uint8_t tipo_pai;
+    inode_pai_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, caminho_pai_str, &tipo_pai);
+    if (inode_pai_num == 0) {
+        printf("rm: não foi possível remover '%s': Diretório pai '%s' não encontrado\n", path_alvo, caminho_pai_str);
+        return;
+    }
+    struct ext2_inode inode_pai_obj;
+    if (read_inode(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0 || !S_ISDIR(inode_pai_obj.i_mode)) {
+        printf("rm: não foi possível remover '%s': Caminho pai '%s' não é um diretório\n", path_alvo, caminho_pai_str);
+        return;
+    }
+
+    // 3. Resolver inode do arquivo a ser removido
+    uint32_t arquivo_inode_num = dir_lookup(fd, sb, bgdt, inode_pai_num, nome_arquivo, NULL);
+    if (arquivo_inode_num == 0) {
+        printf("rm: não foi possível remover '%s': Arquivo ou diretório não encontrado\n", path_alvo);
+        return;
+    }
+
+    // 4. Ler inode do arquivo
+    struct ext2_inode arquivo_inode_obj;
+    if (read_inode(fd, sb, bgdt, arquivo_inode_num, &arquivo_inode_obj) != 0) {
+        printf("rm: erro ao ler inode %u para '%s'\n", arquivo_inode_num, path_alvo);
+        return;
+    }
+
+    // 5. Verificar se é arquivo regular (rm não remove diretórios por padrão)
+    if (S_ISDIR(arquivo_inode_obj.i_mode)) {
+        printf("rm: não é possível remover '%s': É um diretório\n", path_alvo);
+        return;
+    }
+    if (!S_ISREG(arquivo_inode_obj.i_mode)) {
+         printf("rm: não é possível remover '%s': Não é um arquivo regular\n", path_alvo);
+        return;
+    }
+
+    // 6. Remover entrada do diretório pai
+    char dir_data_block[BLOCK_SIZE_FIXED];
+    int entrada_removida_do_diretorio = 0;
+    if (inode_pai_obj.i_block[0] == 0) { /* Diretório pai sem blocos? Improvável se achamos o arquivo nele */ return; }
+    if (read_data_block(fd, inode_pai_obj.i_block[0], dir_data_block) != 0) { return; }
+
+    unsigned int offset = 0;
+    struct ext2_dir_entry_2 *current_entry = NULL;
+    struct ext2_dir_entry_2 *prev_entry = NULL; // Para coalescência
+
+    while (offset < inode_pai_obj.i_size) {
+        current_entry = (struct ext2_dir_entry_2 *)(dir_data_block + offset);
+        if (current_entry->rec_len == 0) break;
+
+        if (current_entry->inode == arquivo_inode_num && current_entry->name_len == strlen(nome_arquivo) &&
+            strncmp(current_entry->name, nome_arquivo, current_entry->name_len) == 0) {
+            
+            // Entrada encontrada. Marcar como não usada.
+            // Abordagem simples: apenas zera o inode.
+            // A coalescência é mais complexa e pode ser omitida para simplificação,
+            // pois `touch`/`mkdir` já sabem reutilizar entradas com inode 0.
+            current_entry->inode = 0; 
+            // Poderíamos também zerar name_len e file_type se quiséssemos ser mais "limpos".
+            // O rec_len permanece o mesmo, o espaço fica reservado mas "vazio".
+
+            entrada_removida_do_diretorio = 1;
+            break; 
+        }
+        prev_entry = current_entry;
+        offset += current_entry->rec_len;
+    }
+
+    if (!entrada_removida_do_diretorio) {
+        printf("rm: inconsistência - arquivo encontrado por dir_lookup mas não na iteração do bloco do diretório.\n");
+        return; // Erro inesperado
+    }
+
+    if (write_data_block(fd, inode_pai_obj.i_block[0], dir_data_block) != 0) {
+        printf("rm: erro ao escrever bloco de dados do diretório pai modificado.\n");
+        // Mesmo com erro aqui, prosseguimos para tentar liberar o inode e blocos do arquivo.
+    }
+    inode_pai_obj.i_mtime = inode_pai_obj.i_ctime = time(NULL);
+    if (write_inode_table_entry(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0) {
+        printf("rm: erro ao atualizar inode do diretório pai.\n");
+    }
+
+    // 7. Decrementar i_links_count (já sabemos que vai a 0 para arquivos simples)
+    arquivo_inode_obj.i_links_count--; // Vai para 0
+
+    // 8. Liberar blocos de dados do arquivo (se i_links_count == 0)
+    if (arquivo_inode_obj.i_links_count == 0) {
+        // Blocos diretos
+        for (int i = 0; i < 12; ++i) {
+            if (arquivo_inode_obj.i_block[i] != 0) {
+                deallocate_data_block(fd, sb, bgdt, arquivo_inode_obj.i_block[i]);
+                arquivo_inode_obj.i_block[i] = 0;
+            }
+        }
+        // Bloco de indireção simples
+        if (arquivo_inode_obj.i_block[12] != 0) {
+            char indirect_block_buffer[BLOCK_SIZE_FIXED];
+            if (read_data_block(fd, arquivo_inode_obj.i_block[12], indirect_block_buffer) == 0) {
+                uint32_t *pointers = (uint32_t *)indirect_block_buffer;
+                int num_pointers = BLOCK_SIZE_FIXED / sizeof(uint32_t);
+                for (int i = 0; i < num_pointers; ++i) {
+                    if (pointers[i] != 0) deallocate_data_block(fd, sb, bgdt, pointers[i]);
+                }
+            }
+            deallocate_data_block(fd, sb, bgdt, arquivo_inode_obj.i_block[12]);
+            arquivo_inode_obj.i_block[12] = 0;
+        }
+        // Bloco de dupla indireção
+        if (arquivo_inode_obj.i_block[13] != 0) {
+            char double_indirect_buffer[BLOCK_SIZE_FIXED];
+            if (read_data_block(fd, arquivo_inode_obj.i_block[13], double_indirect_buffer) == 0) {
+                uint32_t *lvl1_pointers = (uint32_t *)double_indirect_buffer;
+                int num_lvl1_pointers = BLOCK_SIZE_FIXED / sizeof(uint32_t);
+                for (int i = 0; i < num_lvl1_pointers; ++i) {
+                    if (lvl1_pointers[i] != 0) {
+                        char indirect_block_buffer[BLOCK_SIZE_FIXED];
+                        if (read_data_block(fd, lvl1_pointers[i], indirect_block_buffer) == 0) {
+                            uint32_t *lvl2_pointers = (uint32_t *)indirect_block_buffer;
+                            int num_lvl2_pointers = BLOCK_SIZE_FIXED / sizeof(uint32_t);
+                            for (int j = 0; j < num_lvl2_pointers; ++j) {
+                                if (lvl2_pointers[j] != 0) deallocate_data_block(fd, sb, bgdt, lvl2_pointers[j]);
+                            }
+                        }
+                        deallocate_data_block(fd, sb, bgdt, lvl1_pointers[i]);
+                    }
+                }
+            }
+            deallocate_data_block(fd, sb, bgdt, arquivo_inode_obj.i_block[13]);
+            arquivo_inode_obj.i_block[13] = 0;
+        }
+        // Tripla indireção (i_block[14]) omitida pela simplificação.
+
+        arquivo_inode_obj.i_blocks = 0;
+        arquivo_inode_obj.i_size = 0; // Tamanho do arquivo é 0
+        arquivo_inode_obj.i_dtime = time(NULL);
+
+        // 9. Liberar o inode do arquivo
+        deallocate_inode(fd, sb, bgdt, arquivo_inode_num);
+        // Escrever o inode "limpo" (com dtime, size=0, links=0, blocks=0) é opcional,
+        // pois deallocate_inode já marcou o slot como livre. Mas alguns FS fazem isso.
+        // write_inode_table_entry(fd, sb, bgdt, arquivo_inode_num, &arquivo_inode_obj);
+        printf("rm: '%s' removido\n", path_alvo);
+    } else {
+        // Isso não deve acontecer com nossa simplificação de não ter hard links externos.
+        // Se acontecesse, apenas atualizaríamos o inode com o i_links_count menor.
+        // write_inode_table_entry(fd, sb, bgdt, arquivo_inode_num, &arquivo_inode_obj);
+        printf("rm: '%s' (links restantes: %u) - apenas entrada de diretório removida\n", path_alvo, arquivo_inode_obj.i_links_count);
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -1781,6 +2053,9 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(primeiro_token, "mkdir") == 0) {
             char *arg_path_mkdir = strtok(NULL, " \t\n");
             comando_mkdir(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_mkdir);
+        } else if (strcmp(primeiro_token, "rm") == 0) {
+            char *arg_path_rm = strtok(NULL, " \t\n");
+            comando_rm(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rm);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
