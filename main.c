@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L // Para expor S_IFREG e outras macros POSIX
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -6,6 +8,7 @@
 #include <string.h> // Para strcmp, strrchr, etc.
 #include <sys/stat.h> // Para S_ISDIR, S_ISREG, etc. (usado na impressão do i_mode)
 #include <time.h>     // Para ctime() na formatação de datas
+#include <stddef.h> // Para offsetof
 
 // Base Superblock Fields from Ext2 documentation
 // All values are little-endian on disk.
@@ -120,7 +123,7 @@ struct ext2_dir_entry_2 {
 // Função para ler o superblock
 // Retorna o file descriptor (fd) em sucesso, -1 em erro.
 int read_superblock(const char *device_path, struct ext2_super_block *sb) {
-    int fd = open(device_path, O_RDONLY);
+    int fd = open(device_path, O_RDWR);
     if (fd < 0) {
         perror("Erro ao abrir a imagem do disco");
         return -1;
@@ -140,6 +143,26 @@ int read_superblock(const char *device_path, struct ext2_super_block *sb) {
 
     // Não fechar o fd aqui, ele será usado por outras funções
     return fd; // Sucesso, retorna o file descriptor
+}
+
+// Função para escrever o superbloco de volta ao disco.
+// Retorna 0 em sucesso, -1 em erro.
+int write_superblock(int fd, const struct ext2_super_block *sb) {
+    if (lseek(fd, SUPERBLOCK_OFFSET, SEEK_SET) < 0) {
+        perror("Erro ao posicionar para escrita do superbloco");
+        return -1;
+    }
+
+    if (write(fd, sb, sizeof(struct ext2_super_block)) != sizeof(struct ext2_super_block)) {
+        perror("Erro ao escrever o superbloco");
+        return -1;
+    }
+
+    // É uma boa prática garantir que os dados sejam fisicamente escritos no disco,
+    // especialmente para metadados críticos como o superbloco.
+    // fsync(fd); // Pode ser considerado para robustez, mas pode impactar performance.
+
+    return 0; // Sucesso
 }
 
 // Função para ler a Tabela de Descritores de Grupo de Blocos (BGDT)
@@ -292,6 +315,90 @@ int read_data_block(int fd, uint32_t block_num, char *buffer) {
 
     if (read(fd, buffer, BLOCK_SIZE_FIXED) != BLOCK_SIZE_FIXED) {
         perror("Erro ao ler o bloco de dados");
+        return -1;
+    }
+    return 0; // Sucesso
+}
+
+// Função auxiliar para escrever um bloco de dados no disco
+// (Restaurando/Confirmando esta função)
+int write_data_block(int fd, uint32_t block_num, const char *buffer) {
+    if (block_num == 0) {
+        fprintf(stderr, "Erro write_data_block: Tentativa de escrever no bloco de dados 0.\n");
+        return -1; 
+    }
+    off_t offset = (off_t)block_num * BLOCK_SIZE_FIXED;
+    if (lseek(fd, offset, SEEK_SET) < 0) {
+        char err_msg[100];
+        snprintf(err_msg, sizeof(err_msg), "Erro write_data_block: posicionar para bloco %u", block_num);
+        perror(err_msg);
+        return -1;
+    }
+    if (write(fd, buffer, BLOCK_SIZE_FIXED) != BLOCK_SIZE_FIXED) {
+        perror("Erro write_data_block: ao escrever bloco de dados");
+        return -1;
+    }
+    return 0; 
+}
+
+// Função para escrever uma entrada (inode) na tabela de inodes.
+// (Confirmando esta função)
+int write_inode_table_entry(int fd, const struct ext2_super_block *sb,
+                            const struct ext2_group_desc *bgdt, // Usado para obter o início da tabela de inodes do grupo
+                            uint32_t inode_num, const struct ext2_inode *inode_to_write) {
+    if (inode_num == 0) {
+        fprintf(stderr, "Erro write_inode_table_entry: Tentativa de escrever no inode 0.\n");
+        return -1;
+    }
+    uint32_t block_group_index = (inode_num - 1) / sb->s_inodes_per_group;
+    const struct ext2_group_desc *group_descriptor = &bgdt[block_group_index];
+    uint16_t inode_size_on_disk = (sb->s_rev_level == EXT2_GOOD_OLD_REV) ? 
+                                  EXT2_GOOD_OLD_INODE_SIZE : sb->s_inode_size;
+    if (inode_size_on_disk < EXT2_GOOD_OLD_INODE_SIZE) inode_size_on_disk = EXT2_GOOD_OLD_INODE_SIZE;
+
+    uint32_t index_in_group = (inode_num - 1) % sb->s_inodes_per_group;
+    off_t inode_table_start_block_offset = (off_t)group_descriptor->bg_inode_table * BLOCK_SIZE_FIXED;
+    off_t inode_offset_in_table = index_in_group * inode_size_on_disk;
+    off_t final_inode_offset = inode_table_start_block_offset + inode_offset_in_table;
+
+    if (lseek(fd, final_inode_offset, SEEK_SET) < 0) {
+        perror("Erro write_inode_table_entry: lseek");
+        return -1;
+    }
+    if (write(fd, inode_to_write, sizeof(struct ext2_inode)) != sizeof(struct ext2_inode)) {
+        // Assumimos que sizeof(struct ext2_inode) é o que queremos escrever (128 bytes)
+        perror("Erro write_inode_table_entry: write");
+        return -1;
+    }
+    return 0; 
+}
+
+// Função para escrever um descritor de grupo específico na BGDT.
+// Retorna 0 em sucesso, -1 em erro.
+int write_group_descriptor(int fd, const struct ext2_super_block *sb, 
+                           uint32_t group_index_to_write, 
+                           const struct ext2_group_desc *group_desc_to_write) {
+    // Calcular o offset da BGDT. A BGDT começa no bloco seguinte ao superbloco.
+    // Se block_size == 1024, superbloco está no bloco 1 (offset 1024).
+    // BGDT começa no bloco 2 (offset 2048).
+    off_t bgdt_base_offset = SUPERBLOCK_OFFSET + BLOCK_SIZE_FIXED;
+    off_t specific_group_desc_offset = bgdt_base_offset + (group_index_to_write * sizeof(struct ext2_group_desc));
+
+    // Validação do group_index_to_write (não deve exceder o número de grupos)
+    unsigned int num_block_groups = (sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
+    if (group_index_to_write >= num_block_groups) {
+        fprintf(stderr, "Erro write_group_descriptor: Índice de grupo %u é inválido (total de grupos %u).\n", 
+                group_index_to_write, num_block_groups);
+        return -1;
+    }
+
+    if (lseek(fd, specific_group_desc_offset, SEEK_SET) < 0) {
+        perror("Erro write_group_descriptor: lseek");
+        return -1;
+    }
+
+    if (write(fd, group_desc_to_write, sizeof(struct ext2_group_desc)) != sizeof(struct ext2_group_desc)) {
+        perror("Erro write_group_descriptor: write");
         return -1;
     }
     return 0; // Sucesso
@@ -1014,6 +1121,310 @@ void comando_cd(int fd, const struct ext2_super_block *sb,
     free(path_normalizado);
 }
 
+// Funções auxiliares para manipulação de bitmaps
+// buffer: ponteiro para o buffer do bitmap
+// bit_num: índice do bit (0-indexado) a ser verificado/modificado
+
+// Retorna 1 se o bit estiver setado (1), 0 se estiver limpo (0)
+int is_bit_set(const unsigned char *bitmap_buffer, int bit_num) {
+    return (bitmap_buffer[bit_num / 8] & (1 << (bit_num % 8))) != 0;
+}
+
+// Seta o bit (para 1)
+void set_bit(unsigned char *bitmap_buffer, int bit_num) {
+    bitmap_buffer[bit_num / 8] |= (1 << (bit_num % 8));
+}
+
+// Limpa o bit (para 0)
+void clear_bit(unsigned char *bitmap_buffer, int bit_num) {
+    bitmap_buffer[bit_num / 8] &= ~(1 << (bit_num % 8));
+}
+
+// Função para alocar um inode livre.
+// Retorna o número do inode alocado em sucesso, 0 em falha (sem inodes livres).
+// Atualiza o superbloco, descritor de grupo e o bitmap de inodes no disco.
+uint32_t allocate_inode(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt) {
+    unsigned int num_block_groups = (sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
+    unsigned char inode_bitmap_buffer[BLOCK_SIZE_FIXED];
+
+    for (unsigned int group_idx = 0; group_idx < num_block_groups; ++group_idx) {
+        if (bgdt[group_idx].bg_free_inodes_count > 0) {
+            // Este grupo tem inodes livres. Ler seu bitmap de inodes.
+            if (read_data_block(fd, bgdt[group_idx].bg_inode_bitmap, (char*)inode_bitmap_buffer) != 0) {
+                fprintf(stderr, "allocate_inode: Erro ao ler bitmap de inodes do grupo %u (bloco %u)\n", 
+                        group_idx, bgdt[group_idx].bg_inode_bitmap);
+                continue; // Tenta o próximo grupo
+            }
+
+            // Encontrar o primeiro bit 0 no bitmap deste grupo
+            for (unsigned int bit_in_group = 0; bit_in_group < sb->s_inodes_per_group; ++bit_in_group) {
+                if (!is_bit_set(inode_bitmap_buffer, bit_in_group)) {
+                    // Encontramos um inode livre!
+                    set_bit(inode_bitmap_buffer, bit_in_group);
+
+                    // Escrever o bitmap de inodes atualizado de volta
+                    if (write_data_block(fd, bgdt[group_idx].bg_inode_bitmap, (char*)inode_bitmap_buffer) != 0) {
+                        fprintf(stderr, "allocate_inode: Erro ao escrever bitmap de inodes atualizado para grupo %u\n", group_idx);
+                        // Tentativa de reverter o bit? Ou marcar como erro crítico?
+                        // Por agora, apenas reporta e falha na alocação deste inode.
+                        return 0; 
+                    }
+
+                    // Atualizar contagens
+                    sb->s_free_inodes_count--;
+                    bgdt[group_idx].bg_free_inodes_count--;
+
+                    // Escrever superbloco e descritor de grupo atualizados
+                    if (write_superblock(fd, sb) != 0) {
+                        fprintf(stderr, "allocate_inode: Erro ao escrever superbloco após alocação\n");
+                        // TODO: Lidar com inconsistência. Por ora, erro fatal para esta operação.
+                        return 0;
+                    }
+                    // Passando um ponteiro para o elemento específico do array bgdt
+                    if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
+                        fprintf(stderr, "allocate_inode: Erro ao escrever descritor de grupo %u após alocação\n", group_idx);
+                        // TODO: Lidar com inconsistência.
+                        return 0;
+                    }
+
+                    // Calcular o número global do inode
+                    // Inodes são 1-indexados.
+                    uint32_t allocated_inode_num = (group_idx * sb->s_inodes_per_group) + bit_in_group + 1;
+                    
+                    // printf("Debug allocate_inode: Alocado inode %u no grupo %u, bit %u\n", 
+                    //        allocated_inode_num, group_idx, bit_in_group);
+                    return allocated_inode_num;
+                }
+            }
+            // Se chegamos aqui, o contador bg_free_inodes_count estava errado ou o bitmap estava todo setado.
+            fprintf(stderr, "Alerta allocate_inode: Grupo %u indicou inodes livres (%u), mas bitmap estava cheio ou erro.\n", 
+                    group_idx, bgdt[group_idx].bg_free_inodes_count);
+            // Forçar uma recontagem/conserto seria avançado. Por agora, tratamos como se não houvesse inodes aqui.
+            bgdt[group_idx].bg_free_inodes_count = 0; // Evitar tentar este grupo de novo logo em seguida.
+        }
+    }
+
+    fprintf(stderr, "allocate_inode: Não há inodes livres em nenhum grupo de blocos.\n");
+    return 0; // Nenhum inode livre encontrado
+}
+
+// Função para o comando 'touch'
+void comando_touch(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                   uint32_t diretorio_atual_inode_num, char* diretorio_atual_str, // Para parse_path
+                   const char* path_alvo) {
+
+    if (path_alvo == NULL || strlen(path_alvo) == 0) {
+        printf("touch: Nome do arquivo não especificado.\n");
+        return;
+    }
+
+    char nome_arquivo[EXT2_NAME_LEN + 1];
+    char caminho_pai_str[1024]; // Buffer para o caminho do diretório pai
+    uint32_t inode_pai_num;
+
+    // 1. Analisar o caminho para obter o nome do arquivo e o caminho do diretório pai.
+    const char *ultimo_slash = strrchr(path_alvo, '/');
+    if (ultimo_slash != NULL) { // Path contém diretório(s)
+        size_t len_caminho_pai = ultimo_slash - path_alvo;
+        if (len_caminho_pai == 0) { // Ex: "/arquivo.txt"
+            strcpy(caminho_pai_str, "/");
+        } else {
+            strncpy(caminho_pai_str, path_alvo, len_caminho_pai);
+            caminho_pai_str[len_caminho_pai] = '\0';
+        }
+        strncpy(nome_arquivo, ultimo_slash + 1, EXT2_NAME_LEN);
+        nome_arquivo[EXT2_NAME_LEN] = '\0';
+    } else { // Só nome do arquivo, pai é o diretório atual
+        strcpy(caminho_pai_str, "."); // Ou usar diretorio_atual_str diretamente
+        strncpy(nome_arquivo, path_alvo, EXT2_NAME_LEN);
+        nome_arquivo[EXT2_NAME_LEN] = '\0';
+    }
+    
+    if (strlen(nome_arquivo) == 0) {
+        printf("touch: Nome do arquivo inválido (vazio).\n");
+        return;
+    }
+    if (strchr(nome_arquivo, '/') != NULL) {
+        printf("touch: Nome do arquivo não pode conter '/'.\n");
+        return;
+    }
+
+    // 2. Obter o inode do diretório pai.
+    uint8_t tipo_pai;
+    inode_pai_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, caminho_pai_str, &tipo_pai);
+    if (inode_pai_num == 0) {
+        printf("touch: Diretório pai '%s' não encontrado.\n", caminho_pai_str);
+        return;
+    }
+    struct ext2_inode inode_pai_obj;
+    if (read_inode(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0 || !S_ISDIR(inode_pai_obj.i_mode)) {
+        printf("touch: Caminho pai '%s' não é um diretório.\n", caminho_pai_str);
+        return;
+    }
+
+    // 3. Verificar se o nome já existe no diretório pai.
+    if (dir_lookup(fd, sb, bgdt, inode_pai_num, nome_arquivo, NULL) != 0) {
+        // Comportamento Unix: atualiza timestamps. Para este projeto, vamos simplificar:
+        // Se existir, não faz nada ou dá erro. Por ora, não faz nada e avisa.
+        // printf("touch: '%s' já existe em '%s'. (Atualização de timestamp não implementada).\n", nome_arquivo, caminho_pai_str);
+        // Para seguir a especificação "cria o arquivo", vamos dar erro se já existir.
+        printf("touch: '%s' já existe.\n", path_alvo);
+        return;
+    }
+
+    // 4. Alocar um novo inode para o arquivo.
+    uint32_t novo_inode_arquivo_num = allocate_inode(fd, sb, bgdt);
+    if (novo_inode_arquivo_num == 0) {
+        printf("touch: Falha ao alocar novo inode. Disco cheio?\n");
+        return;
+    }
+
+    // 5. Inicializar e escrever o novo inode do arquivo.
+    struct ext2_inode novo_inode_arquivo_obj;
+    memset(&novo_inode_arquivo_obj, 0, sizeof(struct ext2_inode)); // Zera tudo primeiro
+    novo_inode_arquivo_obj.i_mode = S_IFREG | 0644; // Arquivo regular, perms rw-r--r--
+    novo_inode_arquivo_obj.i_uid = 0; // Simplificação: root
+    novo_inode_arquivo_obj.i_gid = 0; // Simplificação: root
+    novo_inode_arquivo_obj.i_size = 0; // Arquivo vazio
+    novo_inode_arquivo_obj.i_links_count = 1;
+    novo_inode_arquivo_obj.i_atime = novo_inode_arquivo_obj.i_mtime = novo_inode_arquivo_obj.i_ctime = time(NULL);
+    novo_inode_arquivo_obj.i_dtime = 0;
+    novo_inode_arquivo_obj.i_blocks = 0; // Nenhum bloco de disco alocado
+
+    if (write_inode_table_entry(fd, sb, bgdt, novo_inode_arquivo_num, &novo_inode_arquivo_obj) != 0) {
+        printf("touch: Falha ao escrever o novo inode do arquivo no disco.\n");
+        // TODO: Deveria tentar desalocar o inode aqui (clear_bit, etc.) - complexo
+        return;
+    }
+
+    // 6. Adicionar entrada ao diretório pai.
+    // Simplificação: diretórios usam 1 bloco. Adiciona no final se houver espaço.
+    char dir_data_block[BLOCK_SIZE_FIXED];
+    if (inode_pai_obj.i_block[0] == 0) { // Diretório pai estava vazio (sem blocos)
+        printf("touch: Erro crítico - diretório pai (inode %u) não tem bloco de dados alocado, mas deveria ter para . e ..\n", inode_pai_num);
+        // TODO: Desalocar inode e reverter. Isso não deveria acontecer em um FS minimamente válido.
+        return;
+    }
+
+    if (read_data_block(fd, inode_pai_obj.i_block[0], dir_data_block) != 0) {
+        printf("touch: Falha ao ler bloco de dados do diretório pai.\n");
+        // TODO: Desalocar inode
+        return;
+    }
+
+    unsigned int offset = 0;
+    struct ext2_dir_entry_2 *entry = NULL;
+    struct ext2_dir_entry_2 *prev_entry = NULL;
+    int entrada_adicionada = 0;
+
+    uint16_t nome_len_real_novo_arq = strlen(nome_arquivo);
+    uint16_t rec_len_necessario_nova_entrada = (offsetof(struct ext2_dir_entry_2, name) + nome_len_real_novo_arq + 3) & ~3;
+
+    while (offset < inode_pai_obj.i_size) {
+        prev_entry = entry;
+        entry = (struct ext2_dir_entry_2 *)(dir_data_block + offset);
+        if (entry->rec_len == 0) break;
+
+        uint16_t rec_len_real_atual = (entry->inode == 0) ? 0 : 
+                                     (offsetof(struct ext2_dir_entry_2, name) + entry->name_len + 3) & ~3;
+        
+        // Tentar adicionar no espaço de uma entrada deletada (inode 0)
+        if (entry->inode == 0 && entry->rec_len >= rec_len_necessario_nova_entrada) {
+            entry->inode = novo_inode_arquivo_num;
+            entry->name_len = nome_len_real_novo_arq;
+            entry->file_type = EXT2_FT_REG_FILE;
+            strncpy(entry->name, nome_arquivo, nome_len_real_novo_arq);
+            // entry->rec_len permanece o mesmo ou pode ser ajustado se houver muito espaço extra.
+            // Por simplicidade, se couber, usamos. Idealmente, se entry->rec_len for > necessário + mínimo para outra entrada,
+            // poderíamos criar uma entrada "vazia" após esta. Mas para o touch, isto basta.
+            entrada_adicionada = 1;
+            break;
+        }
+
+        // Se esta é a última entrada (seu rec_len vai até o fim do espaço usado do bloco)
+        // ou se há espaço entre o fim real desta entrada e o início da próxima (dado por rec_len)
+        if (offset + entry->rec_len >= inode_pai_obj.i_size || 
+            (entry->rec_len > rec_len_real_atual && (entry->rec_len - rec_len_real_atual) >= rec_len_necessario_nova_entrada )) {
+            
+            uint16_t espaco_disponivel_apos_real_atual = entry->rec_len - rec_len_real_atual;
+            if (rec_len_real_atual == 0 && entry->inode == 0){ // Se a entrada atual for inválida/deletada, usar todo o seu rec_len
+                 espaco_disponivel_apos_real_atual = entry->rec_len;
+            }
+
+            if (espaco_disponivel_apos_real_atual >= rec_len_necessario_nova_entrada) {
+                // Encurtar rec_len da entrada atual para seu tamanho real
+                if(entry->inode != 0) { // Só encurta se for uma entrada válida
+                    entry->rec_len = rec_len_real_atual;
+                }
+                // Nova entrada começa após a entrada atual (real)
+                struct ext2_dir_entry_2 *nova_entrada_dir = (struct ext2_dir_entry_2 *)(dir_data_block + offset + entry->rec_len);
+                nova_entrada_dir->inode = novo_inode_arquivo_num;
+                nova_entrada_dir->name_len = nome_len_real_novo_arq;
+                nova_entrada_dir->file_type = EXT2_FT_REG_FILE;
+                strncpy(nova_entrada_dir->name, nome_arquivo, nome_len_real_novo_arq);
+                nova_entrada_dir->rec_len = espaco_disponivel_apos_real_atual; // Usa o restante do espaço original da entrada "entry"
+                
+                entrada_adicionada = 1;
+                break;
+            }
+        }
+        offset += entry->rec_len;
+    }
+
+    // Se não foi possível adicionar (bloco de diretório cheio e sem entradas reutilizáveis)
+    // E estamos dentro da simplificação de 1 bloco por diretório.
+    if (!entrada_adicionada) {
+        // Tentativa de adicionar ao final do bloco, se i_size < BLOCK_SIZE_FIXED
+        if (inode_pai_obj.i_size < BLOCK_SIZE_FIXED && 
+            (BLOCK_SIZE_FIXED - inode_pai_obj.i_size) >= rec_len_necessario_nova_entrada) {
+            
+            // Ajustar rec_len da última entrada real (se houver)
+            if (entry && entry->inode != 0 && offset + entry->rec_len == inode_pai_obj.i_size) {
+                 uint16_t rec_len_real_ultima_entrada = (offsetof(struct ext2_dir_entry_2, name) + entry->name_len + 3) & ~3;
+                 entry->rec_len = rec_len_real_ultima_entrada;
+                 offset = (char*)entry - dir_data_block + entry->rec_len;
+            } else { // senão, offset é o i_size atual
+                 offset = inode_pai_obj.i_size;
+            }
+
+            struct ext2_dir_entry_2 *nova_entrada_dir = (struct ext2_dir_entry_2 *)(dir_data_block + offset);
+            nova_entrada_dir->inode = novo_inode_arquivo_num;
+            nova_entrada_dir->name_len = nome_len_real_novo_arq;
+            nova_entrada_dir->file_type = EXT2_FT_REG_FILE;
+            strncpy(nova_entrada_dir->name, nome_arquivo, nome_len_real_novo_arq);
+            nova_entrada_dir->rec_len = BLOCK_SIZE_FIXED - offset; // Ocupa o resto do bloco
+            
+            inode_pai_obj.i_size = offset + nova_entrada_dir->rec_len; // Atualiza i_size do diretório pai
+            if (inode_pai_obj.i_size > BLOCK_SIZE_FIXED) inode_pai_obj.i_size = BLOCK_SIZE_FIXED; // Garante não exceder
+
+            entrada_adicionada = 1;
+        } else {
+            printf("touch: Falha ao adicionar entrada no diretório pai '%s'. Sem espaço no bloco de dados do diretório (ou lógica de adição falhou).\n", caminho_pai_str);
+            // TODO: Desalocar inode alocado, reverter contagens no SB e GD.
+            // Isso é complexo, por enquanto vazamos o inode se esta parte falhar.
+            return;
+        }
+    }
+
+    // Escrever o bloco de dados do diretório pai modificado
+    if (write_data_block(fd, inode_pai_obj.i_block[0], dir_data_block) != 0) {
+        printf("touch: Falha ao escrever bloco de dados atualizado do diretório pai.\n");
+        // TODO: Desalocar, reverter...
+        return;
+    }
+
+    // Atualizar inode do diretório pai (timestamps)
+    inode_pai_obj.i_mtime = inode_pai_obj.i_ctime = time(NULL);
+    // i_links_count não muda para touch de arquivo.
+    if (write_inode_table_entry(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0) {
+        printf("touch: Falha ao atualizar inode do diretório pai.\n");
+        // TODO: Inconsistência...
+        return;
+    }
+
+    printf("touch: Arquivo '%s' criado com sucesso (inode %u).\n", path_alvo, novo_inode_arquivo_num);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -1103,6 +1514,9 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(primeiro_token, "cd") == 0) {
             char *arg_path_cd = strtok(NULL, " \t\n");
             comando_cd(fd, &sb, bgdt, &diretorio_atual_inode, diretorio_atual, sizeof(diretorio_atual), arg_path_cd);
+        } else if (strcmp(primeiro_token, "touch") == 0) {
+            char *arg_path_touch = strtok(NULL, " \t\n");
+            comando_touch(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_touch);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
