@@ -1425,6 +1425,267 @@ void comando_touch(int fd, struct ext2_super_block *sb, struct ext2_group_desc *
     printf("touch: Arquivo '%s' criado com sucesso (inode %u).\n", path_alvo, novo_inode_arquivo_num);
 }
 
+// Função para alocar um bloco de dados livre.
+// Retorna o número do bloco alocado em sucesso, 0 em falha (sem blocos livres).
+// Atualiza o superbloco, descritor de grupo e o bitmap de blocos no disco.
+uint32_t allocate_data_block(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt) {
+    unsigned int num_block_groups = (sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
+    unsigned char block_bitmap_buffer[BLOCK_SIZE_FIXED];
+
+    // Tentar alocar no mesmo grupo do último inode alocado pode ser uma otimização (localidade).
+    // Por simplicidade, apenas iteramos.
+    for (unsigned int group_idx = 0; group_idx < num_block_groups; ++group_idx) {
+        if (bgdt[group_idx].bg_free_blocks_count > 0) {
+            // Este grupo tem blocos livres. Ler seu bitmap de blocos.
+            if (read_data_block(fd, bgdt[group_idx].bg_block_bitmap, (char*)block_bitmap_buffer) != 0) {
+                fprintf(stderr, "allocate_data_block: Erro ao ler bitmap de blocos do grupo %u (bloco %u)\n", 
+                        group_idx, bgdt[group_idx].bg_block_bitmap);
+                continue; // Tenta o próximo grupo
+            }
+
+            // Encontrar o primeiro bit 0 no bitmap deste grupo
+            // Os blocos de dados em um grupo começam após os blocos de metadados.
+            // O bitmap refere-se aos blocos *dentro* do grupo, numerados de 0 a sb->s_blocks_per_group - 1.
+            // O primeiro bloco de dados utilizável em um grupo não é necessariamente o bit 0 do bitmap,
+            // pois os primeiros blocos do grupo são para superbloco, BGDT, bitmaps, tabela de inodes.
+            // No entanto, o bitmap cobre *todos* os blocos do grupo, e mke2fs marca os de metadados como usados.
+            for (unsigned int bit_in_group = 0; bit_in_group < sb->s_blocks_per_group; ++bit_in_group) {
+                if (!is_bit_set(block_bitmap_buffer, bit_in_group)) {
+                    // Encontramos um bloco livre!
+                    set_bit(block_bitmap_buffer, bit_in_group);
+
+                    if (write_data_block(fd, bgdt[group_idx].bg_block_bitmap, (char*)block_bitmap_buffer) != 0) {
+                        fprintf(stderr, "allocate_data_block: Erro ao escrever bitmap de blocos atualizado para grupo %u\n", group_idx);
+                        return 0; 
+                    }
+
+                    sb->s_free_blocks_count--;
+                    bgdt[group_idx].bg_free_blocks_count--;
+
+                    if (write_superblock(fd, sb) != 0) {
+                        fprintf(stderr, "allocate_data_block: Erro ao escrever superbloco\n");
+                        return 0;
+                    }
+                    if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
+                        fprintf(stderr, "allocate_data_block: Erro ao escrever descritor de grupo %u\n", group_idx);
+                        return 0;
+                    }
+
+                    // Calcular o número global do bloco
+                    // Blocos são geralmente 0-indexados globalmente se o primeiro bloco de dados é 0,
+                    // ou 1-indexados se o primeiro bloco de dados é 1 (e o bloco 0 é o boot sector).
+                    // s_first_data_block indica o primeiro bloco de dados do FS (0 ou 1).
+                    // O número do bloco retornado deve ser o número global.
+                    uint32_t allocated_block_num = (group_idx * sb->s_blocks_per_group) + sb->s_first_data_block + bit_in_group;
+                    
+                    // printf("Debug allocate_data_block: Alocado bloco %u no grupo %u, bit %u\n", 
+                    //        allocated_block_num, group_idx, bit_in_group);
+                    return allocated_block_num;
+                }
+            }
+            fprintf(stderr, "Alerta allocate_data_block: Grupo %u indicou blocos livres (%u), mas bitmap estava cheio.\n", 
+                    group_idx, bgdt[group_idx].bg_free_blocks_count);
+            bgdt[group_idx].bg_free_blocks_count = 0; 
+        }
+    }
+
+    fprintf(stderr, "allocate_data_block: Não há blocos de dados livres em nenhum grupo.\n");
+    return 0; 
+}
+
+// Função para o comando 'mkdir'
+void comando_mkdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                   uint32_t diretorio_atual_inode_num, char* diretorio_atual_str, 
+                   const char* path_alvo) {
+
+    if (path_alvo == NULL || strlen(path_alvo) == 0) {
+        printf("mkdir: Nome do diretório não especificado.\n");
+        return;
+    }
+
+    char nome_novo_dir[EXT2_NAME_LEN + 1];
+    char caminho_pai_str[1024];
+    uint32_t inode_pai_num;
+
+    // 1. Analisar path_alvo (similar ao touch)
+    const char *ultimo_slash = strrchr(path_alvo, '/');
+    if (ultimo_slash != NULL) {
+        // Se houver um /, o caminho pai é tudo antes do / e o nome do novo diretório é tudo depois do /
+        size_t len_caminho_pai = ultimo_slash - path_alvo;
+        if (len_caminho_pai == 0) { strcpy(caminho_pai_str, "/"); }
+        else { strncpy(caminho_pai_str, path_alvo, len_caminho_pai); caminho_pai_str[len_caminho_pai] = '\0'; }
+        strncpy(nome_novo_dir, ultimo_slash + 1, EXT2_NAME_LEN); nome_novo_dir[EXT2_NAME_LEN] = '\0';
+    } else {
+        strcpy(caminho_pai_str, ".");
+        strncpy(nome_novo_dir, path_alvo, EXT2_NAME_LEN); nome_novo_dir[EXT2_NAME_LEN] = '\0';
+    }
+    if (strlen(nome_novo_dir) == 0 || strcmp(nome_novo_dir, ".") == 0 || strcmp(nome_novo_dir, "..") == 0) {
+        printf("mkdir: Nome de diretório inválido: '%s'\n", nome_novo_dir);
+        return;
+    }
+    if (strchr(nome_novo_dir, '/') != NULL) {
+        printf("mkdir: Nome do diretório não pode conter '/'.\n");
+        return;
+    }
+
+    // 2. Obter inode do diretório pai
+    uint8_t tipo_pai;
+    inode_pai_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, caminho_pai_str, &tipo_pai);
+    if (inode_pai_num == 0) {
+        printf("mkdir: Diretório pai '%s' não encontrado.\n", caminho_pai_str);
+        return;
+    }
+    struct ext2_inode inode_pai_obj;
+    if (read_inode(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0 || !S_ISDIR(inode_pai_obj.i_mode)) {
+        printf("mkdir: Caminho pai '%s' não é um diretório.\n", caminho_pai_str);
+        return;
+    }
+
+    // 3. Verificar se nome já existe no pai
+    if (dir_lookup(fd, sb, bgdt, inode_pai_num, nome_novo_dir, NULL) != 0) {
+        printf("mkdir: '%s' já existe.\n", path_alvo);
+        return;
+    }
+
+    // 4. Alocar inode para o novo diretório
+    uint32_t novo_dir_inode_num = allocate_inode(fd, sb, bgdt);
+    if (novo_dir_inode_num == 0) {
+        printf("mkdir: Falha ao alocar inode para novo diretório. Disco cheio?\n");
+        return;
+    }
+
+    // 5. Alocar bloco de dados para o novo diretório
+    uint32_t novo_dir_data_block_num = allocate_data_block(fd, sb, bgdt);
+    if (novo_dir_data_block_num == 0) {
+        printf("mkdir: Falha ao alocar bloco de dados para novo diretório. Disco cheio?\n");
+        // TODO: Desalocar o inode que acabamos de alocar (complexo: clear_bit, reverter contagens)
+        return;
+    }
+
+    // 6. Inicializar inode do novo diretório
+    struct ext2_inode novo_dir_inode_obj;
+    memset(&novo_dir_inode_obj, 0, sizeof(struct ext2_inode));
+    novo_dir_inode_obj.i_mode = S_IFDIR | 0755; // Diretório, rwxr-xr-x
+    novo_dir_inode_obj.i_uid = 0; 
+    novo_dir_inode_obj.i_gid = 0; 
+    novo_dir_inode_obj.i_size = BLOCK_SIZE_FIXED; // Diretório usa um bloco para . e ..
+    novo_dir_inode_obj.i_links_count = 2; // Para . e a entrada no pai
+    novo_dir_inode_obj.i_atime = novo_dir_inode_obj.i_mtime = novo_dir_inode_obj.i_ctime = time(NULL);
+    novo_dir_inode_obj.i_blocks = BLOCK_SIZE_FIXED / 512; // Blocos de 512 bytes
+    novo_dir_inode_obj.i_block[0] = novo_dir_data_block_num;
+
+    // 7. Escrever inode do novo diretório
+    if (write_inode_table_entry(fd, sb, bgdt, novo_dir_inode_num, &novo_dir_inode_obj) != 0) {
+        printf("mkdir: Falha ao escrever inode do novo diretório.\n");
+        // TODO: Desalocar inode e bloco de dados
+        return;
+    }
+
+    // 8. Preparar e escrever bloco de dados do novo diretório (com . e ..)
+    char novo_dir_data_block_buffer[BLOCK_SIZE_FIXED];
+    memset(novo_dir_data_block_buffer, 0, BLOCK_SIZE_FIXED);
+    
+    // Entrada "."
+    struct ext2_dir_entry_2 *dot_entry = (struct ext2_dir_entry_2 *)novo_dir_data_block_buffer;
+    dot_entry->inode = novo_dir_inode_num;
+    dot_entry->name_len = 1;
+    dot_entry->file_type = EXT2_FT_DIR;
+    strcpy(dot_entry->name, ".");
+    dot_entry->rec_len = (offsetof(struct ext2_dir_entry_2, name) + dot_entry->name_len + 3) & ~3;
+    if (dot_entry->rec_len < 12) dot_entry->rec_len = 12; // Mínimo comum para . com padding
+
+    // Entrada ".."
+    struct ext2_dir_entry_2 *dotdot_entry = (struct ext2_dir_entry_2 *)(novo_dir_data_block_buffer + dot_entry->rec_len);
+    dotdot_entry->inode = inode_pai_num;
+    dotdot_entry->name_len = 2;
+    dotdot_entry->file_type = EXT2_FT_DIR;
+    strcpy(dotdot_entry->name, "..");
+    dotdot_entry->rec_len = BLOCK_SIZE_FIXED - dot_entry->rec_len; // Ocupa o resto do bloco
+
+    if (write_data_block(fd, novo_dir_data_block_num, novo_dir_data_block_buffer) != 0) {
+        printf("mkdir: Falha ao escrever bloco de dados do novo diretório.\n");
+        // TODO: Desalocar inode, bloco de dados, reverter tudo.
+        return;
+    }
+
+    // 9. Adicionar entrada para novo diretório no diretório pai (lógica similar ao touch)
+    char pai_dir_data_block[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, inode_pai_obj.i_block[0], pai_dir_data_block) != 0) {
+         printf("mkdir: Falha ao ler bloco de dados do diretório pai para adicionar nova entrada.\n"); return;
+    }
+    unsigned int offset_pai = 0;
+    struct ext2_dir_entry_2 *entry_pai = NULL;
+    int entrada_adicionada_pai = 0;
+    uint16_t nome_len_novo_dir = strlen(nome_novo_dir);
+    uint16_t rec_len_necessario_novo_dir_no_pai = (offsetof(struct ext2_dir_entry_2, name) + nome_len_novo_dir + 3) & ~3;
+
+    while (offset_pai < inode_pai_obj.i_size) {
+        entry_pai = (struct ext2_dir_entry_2 *)(pai_dir_data_block + offset_pai);
+        if (entry_pai->rec_len == 0) break;
+        uint16_t rec_len_real_atual_pai = (entry_pai->inode == 0) ? 0 : 
+                                          (offsetof(struct ext2_dir_entry_2, name) + entry_pai->name_len + 3) & ~3;
+        if (entry_pai->inode == 0 && entry_pai->rec_len >= rec_len_necessario_novo_dir_no_pai) { // Reutiliza deletada
+            entry_pai->inode = novo_dir_inode_num; entry_pai->name_len = nome_len_novo_dir; 
+            entry_pai->file_type = EXT2_FT_DIR; strncpy(entry_pai->name, nome_novo_dir, nome_len_novo_dir);
+            entrada_adicionada_pai = 1; break;
+        }
+        if (offset_pai + entry_pai->rec_len >= inode_pai_obj.i_size || 
+            (entry_pai->rec_len > rec_len_real_atual_pai && (entry_pai->rec_len - rec_len_real_atual_pai) >= rec_len_necessario_novo_dir_no_pai)) {
+            uint16_t espaco_disp = entry_pai->rec_len - rec_len_real_atual_pai;
+            if (rec_len_real_atual_pai == 0 && entry_pai->inode == 0) espaco_disp = entry_pai->rec_len;
+            if (espaco_disp >= rec_len_necessario_novo_dir_no_pai) {
+                if(entry_pai->inode != 0) entry_pai->rec_len = rec_len_real_atual_pai;
+                struct ext2_dir_entry_2 *nova_e = (struct ext2_dir_entry_2 *)(pai_dir_data_block + offset_pai + entry_pai->rec_len);
+                nova_e->inode = novo_dir_inode_num; nova_e->name_len = nome_len_novo_dir;
+                nova_e->file_type = EXT2_FT_DIR; strncpy(nova_e->name, nome_novo_dir, nome_len_novo_dir);
+                nova_e->rec_len = espaco_disp;
+                entrada_adicionada_pai = 1; break;
+            }
+        }
+        offset_pai += entry_pai->rec_len;
+    }
+    if (!entrada_adicionada_pai) {
+        if (inode_pai_obj.i_size < BLOCK_SIZE_FIXED && (BLOCK_SIZE_FIXED - inode_pai_obj.i_size) >= rec_len_necessario_novo_dir_no_pai) {
+            if (entry_pai && entry_pai->inode != 0 && offset_pai + entry_pai->rec_len == inode_pai_obj.i_size) {
+                 uint16_t real_len_ult = (offsetof(struct ext2_dir_entry_2, name) + entry_pai->name_len + 3) & ~3;
+                 entry_pai->rec_len = real_len_ult; offset_pai = (char*)entry_pai - pai_dir_data_block + entry_pai->rec_len;
+            } else { offset_pai = inode_pai_obj.i_size; }
+            struct ext2_dir_entry_2 *nova_e = (struct ext2_dir_entry_2 *)(pai_dir_data_block + offset_pai);
+            nova_e->inode = novo_dir_inode_num; nova_e->name_len = nome_len_novo_dir;
+            nova_e->file_type = EXT2_FT_DIR; strncpy(nova_e->name, nome_novo_dir, nome_len_novo_dir);
+            nova_e->rec_len = BLOCK_SIZE_FIXED - offset_pai;
+            inode_pai_obj.i_size = offset_pai + nova_e->rec_len;
+            if (inode_pai_obj.i_size > BLOCK_SIZE_FIXED) inode_pai_obj.i_size = BLOCK_SIZE_FIXED;
+            entrada_adicionada_pai = 1;
+        } else {
+            printf("mkdir: Falha ao adicionar entrada no diretório pai '%s'. Sem espaço.\n", caminho_pai_str);
+            // TODO: Desalocar inode, bloco de dados.
+            return;
+        }
+    }
+    if (write_data_block(fd, inode_pai_obj.i_block[0], pai_dir_data_block) != 0) {
+        printf("mkdir: Falha ao escrever bloco de dados atualizado do dir pai.\n"); return;
+    }
+
+    // 10. Atualizar inode do diretório pai
+    inode_pai_obj.i_links_count++; // Diretório pai ganha um link do ".." do novo subdir
+    inode_pai_obj.i_mtime = inode_pai_obj.i_ctime = time(NULL);
+    if (write_inode_table_entry(fd, sb, bgdt, inode_pai_num, &inode_pai_obj) != 0) {
+        printf("mkdir: Falha ao atualizar inode do diretório pai.\n"); return;
+    }
+
+    // 11. Atualizar bg_used_dirs_count no grupo do NOVO diretório
+    uint32_t grupo_idx_novo_dir = (novo_dir_inode_num - 1) / sb->s_inodes_per_group;
+    bgdt[grupo_idx_novo_dir].bg_used_dirs_count++;
+    if (write_group_descriptor(fd, sb, grupo_idx_novo_dir, &bgdt[grupo_idx_novo_dir]) != 0) {
+        printf("mkdir: Falha ao atualizar contador de diretórios no descritor de grupo %u.\n", grupo_idx_novo_dir);
+        // Inconsistência, mas o diretório foi criado.
+    }
+
+    printf("mkdir: Diretório '%s' criado com sucesso (inode %u, data block %u).\n", 
+           path_alvo, novo_dir_inode_num, novo_dir_data_block_num);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -1517,6 +1778,9 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(primeiro_token, "touch") == 0) {
             char *arg_path_touch = strtok(NULL, " \t\n");
             comando_touch(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_touch);
+        } else if (strcmp(primeiro_token, "mkdir") == 0) {
+            char *arg_path_mkdir = strtok(NULL, " \t\n");
+            comando_mkdir(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_mkdir);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
