@@ -2247,7 +2247,7 @@ void comando_rename(int fd, struct ext2_super_block *sb, struct ext2_group_desc 
                 if (write_inode_table_entry(fd, sb, bgdt, origem_parent_inode_num, &parent_inode) != 0) {
                     fprintf(stderr, "rename: erro ao atualizar inode do diretório pai\n");
                 }
-
+                printf("rename: arquivo renomeado com sucesso: %s -> %s\n", path_origem, path_destino);
                 return;
             }
             offset += entry->rec_len;
