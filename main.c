@@ -120,6 +120,8 @@ struct ext2_dir_entry_2 {
 #define EXT2_DYNAMIC_REV  1
 #define EXT2_GOOD_OLD_INODE_SIZE 128
 
+#define EXT2_N_BLOCKS 15  // Número total de blocos em um inode (12 diretos + 1 indireto + 1 duplo + 1 triplo)
+
 // Função para ler o superblock
 // Retorna o file descriptor (fd) em sucesso, -1 em erro.
 int read_superblock(const char *device_path, struct ext2_super_block *sb) {
@@ -2543,6 +2545,250 @@ void comando_mv(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgd
     fprintf(stderr, "mv: não há espaço suficiente no diretório de destino\n");
 }
 
+void comando_cp(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+              uint32_t diretorio_atual_inode_num, const char* path_origem, const char* path_destino) {
+    // Verificar se o arquivo de origem existe
+    uint8_t tipo_origem;
+    uint32_t origem_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                   path_origem, &tipo_origem);
+    
+    if (origem_inode_num == 0) {
+        fprintf(stderr, "cp: arquivo de origem não encontrado: %s\n", path_origem);
+        return;
+    }
+
+    // Não permitir copiar diretórios (por enquanto)
+    if (tipo_origem == EXT2_FT_DIR) {
+        fprintf(stderr, "cp: não é possível copiar diretórios (ainda não implementado)\n");
+        return;
+    }
+
+    // Ler o inode do arquivo de origem
+    struct ext2_inode origem_inode;
+    if (read_inode(fd, sb, bgdt, origem_inode_num, &origem_inode) != 0) {
+        fprintf(stderr, "cp: erro ao ler inode do arquivo de origem\n");
+        return;
+    }
+
+    // Obter o nome base do arquivo de origem
+    const char *origem_name = strrchr(path_origem, '/');
+    if (origem_name == NULL) {
+        origem_name = path_origem;
+    } else {
+        origem_name++;
+    }
+
+    // Verificar se o destino existe e se é um diretório
+    uint8_t tipo_destino;
+    uint32_t destino_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                    path_destino, &tipo_destino);
+
+    char caminho_final[1024];
+    const char *nome_final;
+
+    // Se o destino existe e é um diretório, ajustar o caminho
+    if (destino_inode_num != 0 && tipo_destino == EXT2_FT_DIR) {
+        snprintf(caminho_final, sizeof(caminho_final), "%s/%s", path_destino, origem_name);
+        nome_final = origem_name;
+    } else {
+        strncpy(caminho_final, path_destino, sizeof(caminho_final) - 1);
+        nome_final = strrchr(path_destino, '/');
+        if (nome_final == NULL) {
+            nome_final = path_destino;
+        } else {
+            nome_final++;
+        }
+    }
+
+    // Verificar se já existe um arquivo com esse nome no destino
+    uint8_t tipo_temp;
+    if (path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, caminho_final, &tipo_temp) != 0) {
+        fprintf(stderr, "cp: arquivo de destino já existe: %s\n", caminho_final);
+        return;
+    }
+
+    // Obter o diretório pai do destino
+    char destino_parent_path[1024];
+    uint32_t destino_parent_inode_num;
+
+    if (strrchr(caminho_final, '/') != NULL) {
+        strncpy(destino_parent_path, caminho_final, strrchr(caminho_final, '/') - caminho_final);
+        destino_parent_path[strrchr(caminho_final, '/') - caminho_final] = '\0';
+        
+        uint8_t parent_type;
+        destino_parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                     destino_parent_path, &parent_type);
+    } else {
+        destino_parent_inode_num = diretorio_atual_inode_num;
+    }
+
+    // Alocar novo inode para o arquivo de destino
+    uint32_t novo_inode_num = allocate_inode(fd, sb, bgdt);
+    if (novo_inode_num == 0) {
+        fprintf(stderr, "cp: não foi possível alocar novo inode\n");
+        return;
+    }
+
+    // Criar novo inode baseado no original
+    struct ext2_inode novo_inode;
+    memcpy(&novo_inode, &origem_inode, sizeof(struct ext2_inode));
+    
+    // Atualizar tempos do novo inode
+    time_t current_time = time(NULL);
+    novo_inode.i_ctime = current_time;
+    novo_inode.i_atime = current_time;
+    novo_inode.i_mtime = current_time;
+    novo_inode.i_links_count = 1;
+
+    // Alocar novos blocos e copiar dados
+    for (int i = 0; i < EXT2_N_BLOCKS && i < novo_inode.i_blocks / (BLOCK_SIZE_FIXED/512); i++) {
+        if (origem_inode.i_block[i] == 0) continue;
+
+        // Alocar novo bloco
+        uint32_t novo_bloco = allocate_data_block(fd, sb, bgdt);
+        if (novo_bloco == 0) {
+            fprintf(stderr, "cp: erro ao alocar bloco de dados\n");
+            // Limpar blocos já alocados
+            for (int j = 0; j < i; j++) {
+                if (novo_inode.i_block[j] != 0) {
+                    deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[j]);
+                }
+            }
+            deallocate_inode(fd, sb, bgdt, novo_inode_num);
+            return;
+        }
+
+        // Copiar dados do bloco
+        char buffer[BLOCK_SIZE_FIXED];
+        if (read_data_block(fd, origem_inode.i_block[i], buffer) != 0) {
+            fprintf(stderr, "cp: erro ao ler bloco de dados do arquivo de origem\n");
+            // Limpar blocos já alocados
+            for (int j = 0; j <= i; j++) {
+                if (novo_inode.i_block[j] != 0) {
+                    deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[j]);
+                }
+            }
+            deallocate_inode(fd, sb, bgdt, novo_inode_num);
+            return;
+        }
+
+        if (write_data_block(fd, novo_bloco, buffer) != 0) {
+            fprintf(stderr, "cp: erro ao escrever bloco de dados do arquivo de destino\n");
+            // Limpar blocos já alocados
+            for (int j = 0; j <= i; j++) {
+                if (novo_inode.i_block[j] != 0) {
+                    deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[j]);
+                }
+            }
+            deallocate_inode(fd, sb, bgdt, novo_inode_num);
+            return;
+        }
+
+        novo_inode.i_block[i] = novo_bloco;
+    }
+
+    // Escrever o novo inode
+    if (write_inode_table_entry(fd, sb, bgdt, novo_inode_num, &novo_inode) != 0) {
+        fprintf(stderr, "cp: erro ao escrever novo inode\n");
+        // Limpar blocos alocados
+        for (int i = 0; i < EXT2_N_BLOCKS; i++) {
+            if (novo_inode.i_block[i] != 0) {
+                deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[i]);
+            }
+        }
+        deallocate_inode(fd, sb, bgdt, novo_inode_num);
+        return;
+    }
+
+    // Ler o inode do diretório pai do destino
+    struct ext2_inode destino_parent_inode;
+    if (read_inode(fd, sb, bgdt, destino_parent_inode_num, &destino_parent_inode) != 0) {
+        fprintf(stderr, "cp: erro ao ler inode do diretório pai de destino\n");
+        // Limpar recursos alocados
+        for (int i = 0; i < EXT2_N_BLOCKS; i++) {
+            if (novo_inode.i_block[i] != 0) {
+                deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[i]);
+            }
+        }
+        deallocate_inode(fd, sb, bgdt, novo_inode_num);
+        return;
+    }
+
+    // Ler o bloco de dados do diretório pai
+    char dir_data[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, destino_parent_inode.i_block[0], dir_data) != 0) {
+        fprintf(stderr, "cp: erro ao ler bloco de dados do diretório pai\n");
+        // Limpar recursos alocados
+        for (int i = 0; i < EXT2_N_BLOCKS; i++) {
+            if (novo_inode.i_block[i] != 0) {
+                deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[i]);
+            }
+        }
+        deallocate_inode(fd, sb, bgdt, novo_inode_num);
+        return;
+    }
+
+    // Procurar espaço para a nova entrada
+    size_t offset = 0;
+    uint16_t rec_len_necessario = (offsetof(struct ext2_dir_entry_2, name) + strlen(nome_final) + 3) & ~3;
+
+    while (offset < BLOCK_SIZE_FIXED) {
+        struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(dir_data + offset);
+        
+        uint16_t real_len = (offsetof(struct ext2_dir_entry_2, name) + entry->name_len + 3) & ~3;
+        uint16_t espaco_extra = entry->rec_len - real_len;
+
+        if (espaco_extra >= rec_len_necessario) {
+            // Ajustar a entrada atual
+            entry->rec_len = real_len;
+            
+            // Criar nova entrada após a atual
+            struct ext2_dir_entry_2 *nova_entrada = (struct ext2_dir_entry_2 *)(dir_data + offset + real_len);
+            nova_entrada->inode = novo_inode_num;
+            nova_entrada->rec_len = espaco_extra;
+            nova_entrada->name_len = strlen(nome_final);
+            nova_entrada->file_type = tipo_origem;
+            strncpy(nova_entrada->name, nome_final, strlen(nome_final));
+
+            // Escrever o bloco de dados atualizado
+            if (write_data_block(fd, destino_parent_inode.i_block[0], dir_data) != 0) {
+                fprintf(stderr, "cp: erro ao escrever bloco de dados do diretório pai\n");
+                // Limpar recursos alocados
+                for (int i = 0; i < EXT2_N_BLOCKS; i++) {
+                    if (novo_inode.i_block[i] != 0) {
+                        deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[i]);
+                    }
+                }
+                deallocate_inode(fd, sb, bgdt, novo_inode_num);
+                return;
+            }
+
+            // Atualizar o tempo de modificação do diretório pai
+            destino_parent_inode.i_mtime = current_time;
+            destino_parent_inode.i_ctime = current_time;
+            
+            if (write_inode_table_entry(fd, sb, bgdt, destino_parent_inode_num, &destino_parent_inode) != 0) {
+                fprintf(stderr, "cp: erro ao atualizar inode do diretório pai\n");
+                return;
+            }
+
+            return;
+        }
+
+        offset += entry->rec_len;
+        if (offset >= BLOCK_SIZE_FIXED || entry->rec_len == 0) break;
+    }
+
+    fprintf(stderr, "cp: não há espaço suficiente no diretório de destino\n");
+    // Limpar recursos alocados em caso de falha
+    for (int i = 0; i < EXT2_N_BLOCKS; i++) {
+        if (novo_inode.i_block[i] != 0) {
+            deallocate_data_block(fd, sb, bgdt, novo_inode.i_block[i]);
+        }
+    }
+    deallocate_inode(fd, sb, bgdt, novo_inode_num);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -2652,6 +2898,14 @@ int main(int argc, char *argv[]) {
             char *arg_path_origem = strtok(NULL, " \t\n");
             char *arg_path_destino = strtok(NULL, " \t\n");
             comando_mv(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
+        } else if (strcmp(primeiro_token, "cp") == 0) {
+            char *arg_path_origem = strtok(NULL, " \t\n");
+            char *arg_path_destino = strtok(NULL, " \t\n");
+            if (arg_path_origem == NULL || arg_path_destino == NULL) {
+                fprintf(stderr, "Uso: cp <origem> <destino>\n");
+                continue;
+            }
+            comando_cp(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
