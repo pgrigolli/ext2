@@ -2109,7 +2109,7 @@ void comando_rmdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *
             if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
                 fprintf(stderr, "rmdir: erro ao atualizar descritor do grupo\n");
             }
-
+            printf("rmdir: diretório removido com sucesso: %s\n", path_alvo);
             return;
         }
         prev_entry = entry;
