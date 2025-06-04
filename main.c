@@ -2533,7 +2533,7 @@ void comando_mv(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgd
             if (write_inode_table_entry(fd, sb, bgdt, destino_parent_inode_num, &destino_parent_inode) != 0) {
                 fprintf(stderr, "mv: erro ao atualizar inode do diretório pai de destino\n");
             }
-
+            printf("mv: arquivo movido com sucesso: %s -> %s\n", path_origem, path_destino);
             return;
         }
 
