@@ -2261,6 +2261,288 @@ void comando_rename(int fd, struct ext2_super_block *sb, struct ext2_group_desc 
     return;
 }
 
+void comando_mv(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                uint32_t diretorio_atual_inode_num, const char* path_origem, const char* path_destino) {
+    if (path_origem == NULL || path_origem[0] == '\0' || 
+        path_destino == NULL || path_destino[0] == '\0') {
+        fprintf(stderr, "mv: origem e destino devem ser especificados\n");
+        return;
+    }
+
+    // Não permitir mover "." ou ".."
+    if (strcmp(path_origem, ".") == 0 || strcmp(path_origem, "..") == 0 ||
+        strcmp(path_destino, ".") == 0 || strcmp(path_destino, "..") == 0) {
+        fprintf(stderr, "mv: não é possível mover '.' ou '..'\n");
+        return;
+    }
+
+    // Obter o inode do arquivo/diretório de origem
+    uint8_t tipo_origem;
+    uint32_t origem_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                    path_origem, &tipo_origem);
+    
+    if (origem_inode_num == 0) {
+        fprintf(stderr, "mv: arquivo/diretório de origem não encontrado: %s\n", path_origem);
+        return;
+    }
+
+    // Verificar se o destino existe e se é um diretório
+    uint8_t tipo_destino;
+    uint32_t destino_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                     path_destino, &tipo_destino);
+    
+    // Obter o nome base do arquivo de origem
+    const char *origem_name = strrchr(path_origem, '/');
+    if (origem_name == NULL) {
+        origem_name = path_origem;
+    } else {
+        origem_name++; // Pular a barra
+    }
+
+    // Se o destino existe e é um diretório, ajustar o caminho de destino
+    char novo_path_destino[1024];
+    const char *destino_efetivo;
+    
+    if (destino_inode_num != 0) {
+        if (tipo_destino == EXT2_FT_DIR) {
+            // Destino é um diretório, vamos mover para dentro dele
+            snprintf(novo_path_destino, sizeof(novo_path_destino), "%s/%s", 
+                    path_destino, origem_name);
+            destino_efetivo = novo_path_destino;
+
+            // Verificar se já existe um arquivo com esse nome no diretório de destino
+            uint8_t tipo_temp;
+            uint32_t temp_inode = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                     destino_efetivo, &tipo_temp);
+            if (temp_inode != 0) {
+                fprintf(stderr, "mv: já existe um arquivo '%s' no diretório de destino\n", origem_name);
+                return;
+            }
+        } else {
+            fprintf(stderr, "mv: destino já existe e não é um diretório: %s\n", path_destino);
+            return;
+        }
+    } else {
+        destino_efetivo = path_destino;
+    }
+
+    // Obter o diretório pai e nome do arquivo de origem
+    char *origem_last_slash = strrchr(path_origem, '/');
+    char origem_parent_path[1024];
+    uint32_t origem_parent_inode_num;
+
+    if (origem_last_slash == NULL) {
+        origem_parent_inode_num = diretorio_atual_inode_num;
+    } else {
+        if (origem_last_slash == path_origem) {
+            origem_parent_inode_num = EXT2_ROOT_INO;
+        } else {
+            strncpy(origem_parent_path, path_origem, origem_last_slash - path_origem);
+            origem_parent_path[origem_last_slash - path_origem] = '\0';
+            uint8_t parent_type;
+            origem_parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                         origem_parent_path, &parent_type);
+        }
+    }
+
+    // Obter o diretório pai e nome do arquivo de destino
+    char *destino_last_slash = strrchr(destino_efetivo, '/');
+    const char *destino_name;
+    char destino_parent_path[1024];
+    uint32_t destino_parent_inode_num;
+
+    if (destino_last_slash == NULL) {
+        destino_parent_inode_num = diretorio_atual_inode_num;
+        destino_name = destino_efetivo;
+    } else {
+        if (destino_last_slash == destino_efetivo) {
+            destino_parent_inode_num = EXT2_ROOT_INO;
+            destino_name = destino_last_slash + 1;
+        } else {
+            strncpy(destino_parent_path, destino_efetivo, destino_last_slash - destino_efetivo);
+            destino_parent_path[destino_last_slash - destino_efetivo] = '\0';
+            uint8_t parent_type;
+            destino_parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                          destino_parent_path, &parent_type);
+            destino_name = destino_last_slash + 1;
+        }
+    }
+
+    // Verificar se o diretório pai do destino existe
+    if (destino_parent_inode_num == 0) {
+        fprintf(stderr, "mv: diretório pai do destino não existe\n");
+        return;
+    }
+
+    // Primeiro, ler os inodes dos diretórios pai
+    struct ext2_inode origem_parent_inode;
+    if (read_inode(fd, sb, bgdt, origem_parent_inode_num, &origem_parent_inode) != 0) {
+        fprintf(stderr, "mv: erro ao ler inode do diretório pai de origem\n");
+        return;
+    }
+
+    struct ext2_inode destino_parent_inode;
+    if (read_inode(fd, sb, bgdt, destino_parent_inode_num, &destino_parent_inode) != 0) {
+        fprintf(stderr, "mv: erro ao ler inode do diretório pai de destino\n");
+        return;
+    }
+
+    // Ler os blocos de dados dos diretórios
+    char origem_dir_data[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, origem_parent_inode.i_block[0], origem_dir_data) != 0) {
+        fprintf(stderr, "mv: erro ao ler bloco de dados do diretório de origem\n");
+        return;
+    }
+
+    char destino_dir_data[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, destino_parent_inode.i_block[0], destino_dir_data) != 0) {
+        fprintf(stderr, "mv: erro ao ler bloco de dados do diretório de destino\n");
+        return;
+    }
+
+    // Encontrar a entrada na origem
+    size_t origem_offset = 0;
+    struct ext2_dir_entry_2 *origem_prev_entry = NULL;
+    struct ext2_dir_entry_2 *origem_entry = NULL;
+    uint16_t origem_entry_len = 0;
+
+    while (origem_offset < BLOCK_SIZE_FIXED) {
+        origem_entry = (struct ext2_dir_entry_2 *)(origem_dir_data + origem_offset);
+        if (origem_entry->inode != 0 && 
+            origem_entry->name_len == strlen(origem_name) &&
+            strncmp(origem_entry->name, origem_name, origem_entry->name_len) == 0) {
+            origem_entry_len = origem_entry->rec_len;
+            break;
+        }
+        origem_prev_entry = origem_entry;
+        origem_offset += origem_entry->rec_len;
+        if (origem_offset >= BLOCK_SIZE_FIXED || origem_entry->rec_len == 0) break;
+    }
+
+    if (origem_offset >= BLOCK_SIZE_FIXED || origem_entry == NULL) {
+        fprintf(stderr, "mv: erro interno - entrada de origem não encontrada\n");
+        return;
+    }
+
+    // Calcular o espaço necessário para a nova entrada
+    uint16_t rec_len_necessario = (offsetof(struct ext2_dir_entry_2, name) + strlen(destino_name) + 3) & ~3;
+
+    // Procurar espaço no diretório de destino
+    size_t destino_offset = 0;
+    struct ext2_dir_entry_2 *destino_prev_entry = NULL;
+
+    while (destino_offset < BLOCK_SIZE_FIXED) {
+        struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(destino_dir_data + destino_offset);
+        
+        uint16_t real_len = (offsetof(struct ext2_dir_entry_2, name) + entry->name_len + 3) & ~3;
+        uint16_t espaco_extra = entry->rec_len - real_len;
+
+        if (espaco_extra >= rec_len_necessario) {
+            // Ajustar a entrada atual
+            entry->rec_len = real_len;
+            
+            // Criar nova entrada após a atual
+            struct ext2_dir_entry_2 *nova_entrada = (struct ext2_dir_entry_2 *)(destino_dir_data + destino_offset + real_len);
+            nova_entrada->inode = origem_entry->inode;
+            nova_entrada->rec_len = espaco_extra;
+            nova_entrada->name_len = strlen(destino_name);
+            nova_entrada->file_type = origem_entry->file_type;
+            strncpy(nova_entrada->name, destino_name, strlen(destino_name));
+
+            // Remover a entrada antiga do diretório de origem
+            if (origem_offset + origem_entry_len >= BLOCK_SIZE_FIXED) {
+                if (origem_prev_entry) {
+                    origem_prev_entry->rec_len += origem_entry_len;
+                }
+            } else {
+                size_t remaining = BLOCK_SIZE_FIXED - (origem_offset + origem_entry_len);
+                memmove(origem_dir_data + origem_offset,
+                       origem_dir_data + origem_offset + origem_entry_len,
+                       remaining);
+                
+                struct ext2_dir_entry_2 *last = (struct ext2_dir_entry_2 *)(origem_dir_data + BLOCK_SIZE_FIXED - origem_entry_len);
+                last->rec_len += origem_entry_len;
+            }
+
+            // Escrever as alterações nos blocos de dados
+            if (write_data_block(fd, destino_parent_inode.i_block[0], destino_dir_data) != 0) {
+                fprintf(stderr, "mv: erro ao escrever bloco de dados do diretório de destino\n");
+                return;
+            }
+
+            if (write_data_block(fd, origem_parent_inode.i_block[0], origem_dir_data) != 0) {
+                fprintf(stderr, "mv: erro ao escrever bloco de dados do diretório de origem\n");
+                return;
+            }
+
+            // Se for um diretório, atualizar ".." para apontar para o novo pai
+            if (tipo_origem == EXT2_FT_DIR) {
+                struct ext2_inode dir_inode;
+                if (read_inode(fd, sb, bgdt, origem_entry->inode, &dir_inode) != 0) {
+                    fprintf(stderr, "mv: erro ao ler inode do diretório movido\n");
+                    return;
+                }
+
+                char dir_content[BLOCK_SIZE_FIXED];
+                if (read_data_block(fd, dir_inode.i_block[0], dir_content) != 0) {
+                    fprintf(stderr, "mv: erro ao ler conteúdo do diretório movido\n");
+                    return;
+                }
+
+                // Atualizar a entrada ".."
+                struct ext2_dir_entry_2 *dotdot = (struct ext2_dir_entry_2 *)(dir_content + 
+                    ((struct ext2_dir_entry_2 *)dir_content)->rec_len);
+                if (strncmp(dotdot->name, "..", 2) == 0) {
+                    dotdot->inode = destino_parent_inode_num;
+                    
+                    if (write_data_block(fd, dir_inode.i_block[0], dir_content) != 0) {
+                        fprintf(stderr, "mv: erro ao atualizar entrada '..' do diretório\n");
+                        return;
+                    }
+                }
+
+                // Atualizar contadores de diretório nos grupos
+                uint32_t origem_group = (origem_parent_inode_num - 1) / sb->s_inodes_per_group;
+                uint32_t destino_group = (destino_parent_inode_num - 1) / sb->s_inodes_per_group;
+                
+                if (origem_group != destino_group) {
+                    bgdt[origem_group].bg_used_dirs_count--;
+                    bgdt[destino_group].bg_used_dirs_count++;
+                    
+                    if (write_group_descriptor(fd, sb, origem_group, &bgdt[origem_group]) != 0) {
+                        fprintf(stderr, "mv: erro ao atualizar descritor do grupo de origem\n");
+                    }
+                    if (write_group_descriptor(fd, sb, destino_group, &bgdt[destino_group]) != 0) {
+                        fprintf(stderr, "mv: erro ao atualizar descritor do grupo de destino\n");
+                    }
+                }
+            }
+
+            // Atualizar os tempos de modificação dos diretórios pais
+            time_t current_time = time(NULL);
+            origem_parent_inode.i_mtime = current_time;
+            origem_parent_inode.i_ctime = current_time;
+            destino_parent_inode.i_mtime = current_time;
+            destino_parent_inode.i_ctime = current_time;
+
+            if (write_inode_table_entry(fd, sb, bgdt, origem_parent_inode_num, &origem_parent_inode) != 0) {
+                fprintf(stderr, "mv: erro ao atualizar inode do diretório pai de origem\n");
+            }
+            if (write_inode_table_entry(fd, sb, bgdt, destino_parent_inode_num, &destino_parent_inode) != 0) {
+                fprintf(stderr, "mv: erro ao atualizar inode do diretório pai de destino\n");
+            }
+
+            return;
+        }
+
+        destino_prev_entry = entry;
+        destino_offset += entry->rec_len;
+        if (destino_offset >= BLOCK_SIZE_FIXED || entry->rec_len == 0) break;
+    }
+
+    fprintf(stderr, "mv: não há espaço suficiente no diretório de destino\n");
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -2366,6 +2648,10 @@ int main(int argc, char *argv[]) {
             char *arg_path_origem = strtok(NULL, " \t\n");
             char *arg_path_destino = strtok(NULL, " \t\n");
             comando_rename(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
+        } else if (strcmp(primeiro_token, "mv") == 0) {
+            char *arg_path_origem = strtok(NULL, " \t\n");
+            char *arg_path_destino = strtok(NULL, " \t\n");
+            comando_mv(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
