@@ -1958,6 +1958,309 @@ void comando_rm(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgd
     }
 }
 
+void comando_rmdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                  uint32_t diretorio_atual_inode_num, const char* path_alvo) {
+    if (path_alvo == NULL || path_alvo[0] == '\0') {
+        fprintf(stderr, "rmdir: caminho não especificado\n");
+        return;
+    }
+
+    // Não permitir remover "." ou ".."
+    if (strcmp(path_alvo, ".") == 0 || strcmp(path_alvo, "..") == 0) {
+        fprintf(stderr, "rmdir: não é possível remover '.' ou '..'\n");
+        return;
+    }
+
+    // Obter o inode do diretório a ser removido
+    uint8_t tipo_alvo;
+    uint32_t dir_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                 path_alvo, &tipo_alvo);
+    
+    if (dir_inode_num == 0) {
+        fprintf(stderr, "rmdir: diretório não encontrado: %s\n", path_alvo);
+        return;
+    }
+
+    if (tipo_alvo != EXT2_FT_DIR) {
+        fprintf(stderr, "rmdir: '%s' não é um diretório\n", path_alvo);
+        return;
+    }
+
+    // Ler o inode do diretório a ser removido
+    struct ext2_inode dir_inode;
+    if (read_inode(fd, sb, bgdt, dir_inode_num, &dir_inode) != 0) {
+        fprintf(stderr, "rmdir: erro ao ler inode do diretório\n");
+        return;
+    }
+
+    // Verificar se o diretório está vazio (apenas "." e "..")
+    char dir_data[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, dir_inode.i_block[0], dir_data) != 0) {
+        fprintf(stderr, "rmdir: erro ao ler bloco de dados do diretório\n");
+        return;
+    }
+
+    size_t offset = 0;
+    int entry_count = 0;
+    while (offset < BLOCK_SIZE_FIXED) {
+        struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(dir_data + offset);
+        if (entry->inode != 0) {
+            entry_count++;
+            // Se encontrarmos mais de 2 entradas (além de . e ..), o diretório não está vazio
+            if (entry_count > 2) {
+                fprintf(stderr, "rmdir: diretório não está vazio\n");
+                return;
+            }
+        }
+        offset += entry->rec_len;
+        if (offset >= BLOCK_SIZE_FIXED || entry->rec_len == 0) break;
+    }
+
+    // Obter o inode do diretório pai e o nome do diretório a ser removido
+    char *last_slash = strrchr(path_alvo, '/');
+    const char *dir_name;
+    char parent_path[1024];
+    uint32_t parent_inode_num;
+
+    if (last_slash == NULL) {
+        // Caminho sem '/', diretório pai é o atual
+        parent_inode_num = diretorio_atual_inode_num;
+        dir_name = path_alvo;
+    } else {
+        // Extrair o caminho do pai e o nome do diretório
+        if (last_slash == path_alvo) {
+            // Caso especial: "/nome"
+            parent_inode_num = EXT2_ROOT_INO;
+            dir_name = last_slash + 1;
+        } else {
+            strncpy(parent_path, path_alvo, last_slash - path_alvo);
+            parent_path[last_slash - path_alvo] = '\0';
+            uint8_t parent_type;
+            parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                  parent_path, &parent_type);
+            dir_name = last_slash + 1;
+        }
+    }
+
+    // Ler o inode do diretório pai
+    struct ext2_inode parent_inode;
+    if (read_inode(fd, sb, bgdt, parent_inode_num, &parent_inode) != 0) {
+        fprintf(stderr, "rmdir: erro ao ler inode do diretório pai\n");
+        return;
+    }
+
+    // Ler o bloco de dados do diretório pai
+    char parent_data[BLOCK_SIZE_FIXED];
+    if (read_data_block(fd, parent_inode.i_block[0], parent_data) != 0) {
+        fprintf(stderr, "rmdir: erro ao ler bloco de dados do diretório pai\n");
+        return;
+    }
+
+    // Procurar e remover a entrada do diretório
+    offset = 0;
+    struct ext2_dir_entry_2 *prev_entry = NULL;
+    while (offset < BLOCK_SIZE_FIXED) {
+        struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(parent_data + offset);
+        if (entry->inode != 0 && entry->name_len == strlen(dir_name) &&
+            strncmp(entry->name, dir_name, entry->name_len) == 0) {
+            
+            // Se for a última entrada, apenas ajustar o rec_len da entrada anterior
+            if (offset + entry->rec_len >= BLOCK_SIZE_FIXED) {
+                if (prev_entry) {
+                    prev_entry->rec_len += entry->rec_len;
+                }
+            } else {
+                // Se não for a última, copiar todas as entradas seguintes para frente
+                size_t remaining = BLOCK_SIZE_FIXED - (offset + entry->rec_len);
+                memmove(parent_data + offset,
+                       parent_data + offset + entry->rec_len,
+                       remaining);
+                
+                // Ajustar o rec_len da última entrada para cobrir o espaço liberado
+                struct ext2_dir_entry_2 *last = (struct ext2_dir_entry_2 *)(parent_data + BLOCK_SIZE_FIXED - entry->rec_len);
+                last->rec_len += entry->rec_len;
+            }
+
+            // Atualizar o bloco de dados do diretório pai
+            if (write_data_block(fd, parent_inode.i_block[0], parent_data) != 0) {
+                fprintf(stderr, "rmdir: erro ao escrever bloco de dados do diretório pai\n");
+                return;
+            }
+
+            // Atualizar o tempo de modificação do diretório pai
+            parent_inode.i_mtime = time(NULL);
+            parent_inode.i_ctime = time(NULL);
+            if (write_inode_table_entry(fd, sb, bgdt, parent_inode_num, &parent_inode) != 0) {
+                fprintf(stderr, "rmdir: erro ao atualizar inode do diretório pai\n");
+                return;
+            }
+
+            // Desalocar o bloco de dados do diretório
+            deallocate_data_block(fd, sb, bgdt, dir_inode.i_block[0]);
+
+            // Desalocar o inode do diretório
+            deallocate_inode(fd, sb, bgdt, dir_inode_num);
+
+            // Decrementar bg_used_dirs_count no grupo do inode
+            uint32_t group_idx = (dir_inode_num - 1) / sb->s_inodes_per_group;
+            bgdt[group_idx].bg_used_dirs_count--;
+            if (write_group_descriptor(fd, sb, group_idx, &bgdt[group_idx]) != 0) {
+                fprintf(stderr, "rmdir: erro ao atualizar descritor do grupo\n");
+            }
+
+            return;
+        }
+        prev_entry = entry;
+        offset += entry->rec_len;
+        if (offset >= BLOCK_SIZE_FIXED || entry->rec_len == 0) break;
+    }
+
+    fprintf(stderr, "rmdir: erro interno - entrada do diretório não encontrada\n");
+}
+
+void comando_rename(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
+                   uint32_t diretorio_atual_inode_num, const char* path_origem, const char* path_destino) {
+    if (path_origem == NULL || path_origem[0] == '\0' || 
+        path_destino == NULL || path_destino[0] == '\0') {
+        fprintf(stderr, "rename: origem e destino devem ser especificados\n");
+        return;
+    }
+
+    // Não permitir renomear "." ou ".."
+    if (strcmp(path_origem, ".") == 0 || strcmp(path_origem, "..") == 0 ||
+        strcmp(path_destino, ".") == 0 || strcmp(path_destino, "..") == 0) {
+        fprintf(stderr, "rename: não é possível renomear '.' ou '..'\n");
+        return;
+    }
+
+    // Obter o inode do arquivo/diretório de origem
+    uint8_t tipo_origem;
+    uint32_t origem_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                    path_origem, &tipo_origem);
+    
+    if (origem_inode_num == 0) {
+        fprintf(stderr, "rename: arquivo/diretório de origem não encontrado: %s\n", path_origem);
+        return;
+    }
+
+    // Verificar se o destino já existe
+    uint8_t tipo_destino;
+    uint32_t destino_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num, 
+                                                     path_destino, &tipo_destino);
+    
+    if (destino_inode_num != 0) {
+        fprintf(stderr, "rename: destino já existe: %s\n", path_destino);
+        return;
+    }
+
+    // Obter o diretório pai e nome do arquivo de origem
+    char *origem_last_slash = strrchr(path_origem, '/');
+    const char *origem_name;
+    char origem_parent_path[1024];
+    uint32_t origem_parent_inode_num;
+
+    if (origem_last_slash == NULL) {
+        origem_parent_inode_num = diretorio_atual_inode_num;
+        origem_name = path_origem;
+    } else {
+        if (origem_last_slash == path_origem) {
+            origem_parent_inode_num = EXT2_ROOT_INO;
+            origem_name = origem_last_slash + 1;
+        } else {
+            strncpy(origem_parent_path, path_origem, origem_last_slash - path_origem);
+            origem_parent_path[origem_last_slash - path_origem] = '\0';
+            uint8_t parent_type;
+            origem_parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                         origem_parent_path, &parent_type);
+            origem_name = origem_last_slash + 1;
+        }
+    }
+
+    // Obter o diretório pai e nome do arquivo de destino
+    char *destino_last_slash = strrchr(path_destino, '/');
+    const char *destino_name;
+    char destino_parent_path[1024];
+    uint32_t destino_parent_inode_num;
+
+    if (destino_last_slash == NULL) {
+        destino_parent_inode_num = diretorio_atual_inode_num;
+        destino_name = path_destino;
+    } else {
+        if (destino_last_slash == path_destino) {
+            destino_parent_inode_num = EXT2_ROOT_INO;
+            destino_name = destino_last_slash + 1;
+        } else {
+            strncpy(destino_parent_path, path_destino, destino_last_slash - path_destino);
+            destino_parent_path[destino_last_slash - path_destino] = '\0';
+            uint8_t parent_type;
+            destino_parent_inode_num = path_to_inode_number(fd, sb, bgdt, diretorio_atual_inode_num,
+                                                          destino_parent_path, &parent_type);
+            destino_name = destino_last_slash + 1;
+        }
+    }
+
+    // Verificar se o diretório pai do destino existe
+    if (destino_parent_inode_num == 0) {
+        fprintf(stderr, "rename: diretório pai do destino não existe\n");
+        return;
+    }
+
+    // Se origem e destino estão no mesmo diretório, podemos simplificar a operação
+    if (origem_parent_inode_num == destino_parent_inode_num) {
+        // Ler o inode do diretório pai
+        struct ext2_inode parent_inode;
+        if (read_inode(fd, sb, bgdt, origem_parent_inode_num, &parent_inode) != 0) {
+            fprintf(stderr, "rename: erro ao ler inode do diretório pai\n");
+            return;
+        }
+
+        // Ler o bloco de dados do diretório
+        char dir_data[BLOCK_SIZE_FIXED];
+        if (read_data_block(fd, parent_inode.i_block[0], dir_data) != 0) {
+            fprintf(stderr, "rename: erro ao ler bloco de dados do diretório\n");
+            return;
+        }
+
+        // Procurar a entrada a ser renomeada
+        size_t offset = 0;
+        while (offset < BLOCK_SIZE_FIXED) {
+            struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(dir_data + offset);
+            if (entry->inode != 0 && 
+                entry->name_len == strlen(origem_name) &&
+                strncmp(entry->name, origem_name, entry->name_len) == 0) {
+                
+                // Atualizar o nome
+                entry->name_len = strlen(destino_name);
+                strncpy(entry->name, destino_name, entry->name_len);
+
+                // Escrever o bloco de dados atualizado
+                if (write_data_block(fd, parent_inode.i_block[0], dir_data) != 0) {
+                    fprintf(stderr, "rename: erro ao escrever bloco de dados do diretório\n");
+                    return;
+                }
+
+                // Atualizar o tempo de modificação do diretório pai
+                parent_inode.i_mtime = time(NULL);
+                parent_inode.i_ctime = time(NULL);
+                if (write_inode_table_entry(fd, sb, bgdt, origem_parent_inode_num, &parent_inode) != 0) {
+                    fprintf(stderr, "rename: erro ao atualizar inode do diretório pai\n");
+                }
+
+                return;
+            }
+            offset += entry->rec_len;
+            if (offset >= BLOCK_SIZE_FIXED || entry->rec_len == 0) break;
+        }
+
+        fprintf(stderr, "rename: erro interno - entrada não encontrada\n");
+        return;
+    }
+
+    // Se chegamos aqui, origem e destino estão em diretórios diferentes
+    fprintf(stderr, "rename: não é possível mover entre diretórios diferentes ainda\n");
+    return;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <imagem_ext2>\n", argv[0]);
@@ -2056,6 +2359,13 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(primeiro_token, "rm") == 0) {
             char *arg_path_rm = strtok(NULL, " \t\n");
             comando_rm(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rm);
+        } else if (strcmp(primeiro_token, "rmdir") == 0) {
+            char *arg_path_rmdir = strtok(NULL, " \t\n");
+            comando_rmdir(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rmdir);
+        } else if (strcmp(primeiro_token, "rename") == 0) {
+            char *arg_path_origem = strtok(NULL, " \t\n");
+            char *arg_path_destino = strtok(NULL, " \t\n");
+            comando_rename(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
         } else if (strcmp(primeiro_token, "quit") == 0 || strcmp(primeiro_token, "exit") == 0) {
             printf("Saindo.\n");
             break;
