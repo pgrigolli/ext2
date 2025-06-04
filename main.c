@@ -2771,7 +2771,7 @@ void comando_cp(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgd
                 fprintf(stderr, "cp: erro ao atualizar inode do diretório pai\n");
                 return;
             }
-
+            printf("cp: arquivo copiado com sucesso: %s -> %s\n", path_origem, path_destino);
             return;
         }
 
