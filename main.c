@@ -1,3 +1,15 @@
+/*
+    Implementação do sistema de arquivos Ext2 em C
+    Alunos:
+        Eduardo Knabben Tiyo         RA:2551748
+        Pedro Chouery Grigolli       RA: 2551845
+        Felipe Martins Sanches       RA: 2390809
+        Ingrid Reupke Sbeguen Moran  RA: 2349388
+
+    Data de criação: 24/05/2025
+    Datas de alteação: 24/05/2025, 2/06/2025, 3/06/2025, 4/06/2025, 5/06/2025, 10/06/2025
+*/
+
 #define _POSIX_C_SOURCE 200809L // Para expor S_IFREG e outras macros POSIX
 
 #include <stdio.h>
