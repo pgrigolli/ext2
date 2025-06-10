@@ -584,7 +584,7 @@ uint32_t path_to_inode_number(int fd, const struct ext2_super_block *sb,
     return current_inode; // Retorna o inode do caminho resolvido
 }
 
-// Implementa o comando 'ls', que lista o conteúdo de um diretório ou informações de um arquivo.
+// Implementa o comando 'ls', que lista o conteúdo de um diretório com detalhes adicionais.
 void comando_ls(int fd, const struct ext2_super_block *sb, 
                 const struct ext2_group_desc *bgdt, 
                 uint32_t diretorio_inode_num, const char* path_argumento) {
@@ -632,9 +632,9 @@ void comando_ls(int fd, const struct ext2_super_block *sb,
         return;
     }
 
-    printf("Conteúdo do diretório (inode %u):\n", inode_a_listar);
+    // Itera pelas entradas do diretório
     unsigned int offset = 0;
-    while (offset < dir_inode_obj.i_size) { // Itera pelas entradas do diretório
+    while (offset < dir_inode_obj.i_size) {
         if (offset >= BLOCK_SIZE_FIXED) break; 
 
         struct ext2_dir_entry_2 *entry = (struct ext2_dir_entry_2 *)(data_block_buffer + offset);
@@ -645,12 +645,13 @@ void comando_ls(int fd, const struct ext2_super_block *sb,
             strncpy(name_buffer, entry->name, entry->name_len);
             name_buffer[entry->name_len] = '\0';
             
-            // Adiciona uma barra se for um diretório, para facilitar a visualização
-            if (entry->file_type == EXT2_FT_DIR) {
-                printf("%s/\n", name_buffer);
-            } else {
-                printf("%s\n", name_buffer);
-            }
+            // Imprime os detalhes da entrada no formato solicitado
+            printf("%s\n", name_buffer);
+            printf("inode: %u\n", entry->inode);
+            printf("record lenght: %u\n", entry->rec_len);
+            printf("name lenght: %u\n", entry->name_len);
+            printf("file type: %u\n", entry->file_type);
+            printf("\n");
         }
         offset += entry->rec_len; // Move para a próxima entrada
     }
