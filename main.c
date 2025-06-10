@@ -385,46 +385,47 @@ int write_group_descriptor(int fd, const struct ext2_super_block *sb,
 
 // Implementa o comando 'info', que exibe informações detalhadas do superbloco Ext2.
 void comando_info(struct ext2_super_block *sb) {
-    printf("--- Informações do Superbloco ---\n");
-    printf("Magic number: 0x%X (Esperado: 0xEF53)\n", sb->s_magic);
-    if (sb->s_magic != 0xEF53) {
-        printf("ERRO: Magic number não corresponde ao Ext2!\n");
-    }
-    printf("Total de inodes: %u\n", sb->s_inodes_count);
-    printf("Total de blocos: %u\n", sb->s_blocks_count);
-    printf("Blocos reservados: %u\n", sb->s_r_blocks_count);
-    printf("Blocos livres: %u\n", sb->s_free_blocks_count);
-    printf("Inodes livres: %u\n", sb->s_free_inodes_count);
-    printf("Primeiro bloco de dados: %u\n", sb->s_first_data_block);
+    // Exibe o nome do volume
+    printf("Volume name.....: %.16s\n", sb->s_volume_name);
     
-    unsigned int block_size = 1024; // Simplificação do projeto: tamanho do bloco fixo em 1024 bytes
-    printf("Tamanho do bloco: %u bytes (definido como 1024 pela simplificação)\n", block_size);
-    printf("Blocos por grupo: %u\n", sb->s_blocks_per_group);
-    printf("Inodes por grupo: %u\n", sb->s_inodes_per_group);
-    printf("Último montagem (mount time): %u\n", sb->s_mtime);
-    printf("Última escrita (write time): %u\n", sb->s_wtime);
-    printf("Contagem de montagens: %u\n", sb->s_mnt_count);
-    printf("Contagem máxima de montagens: %u\n", sb->s_max_mnt_count);
-    printf("Estado do sistema de arquivos: %u\n", sb->s_state);
-    printf("Tratamento de erro: %u\n", sb->s_errors);
-    printf("Nível de revisão menor: %u\n", sb->s_minor_rev_level);
-    printf("Última checagem (last check): %u\n", sb->s_lastcheck);
-    printf("Intervalo de checagem: %u\n", sb->s_checkinterval);
-    printf("SO criador: %u (0=Linux, 1=Hurd, 2=Masix, 3=FreeBSD, 4=Lites)\n", sb->s_creator_os);
-    printf("Nível de revisão: %u\n", sb->s_rev_level);
-    if (sb->s_rev_level >= 1) { // Campos válidos apenas se rev_level >= EXT2_DYNAMIC_REV
-        printf("Primeiro inode não reservado: %u\n", sb->s_first_ino);
-        printf("Tamanho da estrutura do inode: %u bytes\n", sb->s_inode_size);
-    }
-    printf("Nome do volume: %.16s\n", sb->s_volume_name);
-    printf("Último local de montagem: %.64s\n", sb->s_last_mounted);
+    // Calcula o tamanho total da imagem (em bytes)
+    uint64_t tamanho_imagem = (uint64_t)sb->s_blocks_count * BLOCK_SIZE_FIXED;
+    printf("Image size......: %llu bytes\n", (unsigned long long)tamanho_imagem);
+
+    // Espaço livre em KiB
+    uint32_t espaco_livre_kib = (sb->s_free_blocks_count * BLOCK_SIZE_FIXED) / 1024;
+    printf("Free space......: %u KiB\n", espaco_livre_kib);
     
-    // Calcula o número de grupos de blocos com base nas contagens de blocos e inodes.
-    unsigned int num_block_groups_blocks = (sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
-    unsigned int num_block_groups_inodes = (sb->s_inodes_count + sb->s_inodes_per_group - 1) / sb->s_inodes_per_group;
-    printf("Número de grupos de blocos (baseado em blocos): %u\n", num_block_groups_blocks);
-    printf("Número de grupos de blocos (baseado em inodes): %u\n", num_block_groups_inodes);
-    printf("-----------------------------------\n");
+    // Inodes livres
+    printf("Free inodes.....: %u\n", sb->s_free_inodes_count);
+    
+    // Blocos livres
+    printf("Free blocks.....: %u\n", sb->s_free_blocks_count);
+    
+    // Tamanho do bloco
+    printf("Block size......: %u bytes\n", BLOCK_SIZE_FIXED);
+    
+    // Tamanho do inode
+    uint16_t inode_size = (sb->s_rev_level >= EXT2_DYNAMIC_REV && sb->s_inode_size > 0) ? 
+                          sb->s_inode_size : EXT2_GOOD_OLD_INODE_SIZE;
+    printf("Inode size......: %u bytes\n", inode_size);
+    
+    // Quantidade de grupos
+    unsigned int num_block_groups = (sb->s_blocks_count + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
+    printf("Groups count....: %u\n", num_block_groups);
+    
+    // Tamanho de cada grupo em blocos
+    printf("Groups size.....: %u blocks\n", sb->s_blocks_per_group);
+    
+    // Inodes por grupo
+    printf("Groups inodes...: %u inodes\n", sb->s_inodes_per_group);
+    
+    // Tamanho da tabela de inodes em blocos
+    uint32_t inode_table_size_blocks = (sb->s_inodes_per_group * inode_size) / BLOCK_SIZE_FIXED;
+    if ((sb->s_inodes_per_group * inode_size) % BLOCK_SIZE_FIXED != 0) {
+        inode_table_size_blocks++; // Arredonda para cima se necessário
+    }
+    printf("Inodetable size.: %u blocks\n", inode_table_size_blocks);
 }
 
 // Função auxiliar para procurar uma entrada em um diretório e retornar seu inode.
