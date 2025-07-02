@@ -394,7 +394,7 @@ void comando_info(struct ext2_super_block *sb) {
     printf("Image size......: %llu bytes\n", (unsigned long long)tamanho_imagem);
 
     // Espaço livre em KiB
-    uint32_t espaco_livre_kib = (sb->s_free_blocks_count * BLOCK_SIZE_FIXED) / 1024;
+    uint32_t espaco_livre_kib = (sb->s_free_blocks_count);
     printf("Free space......: %u KiB\n", espaco_livre_kib);
     
     // Inodes livres
