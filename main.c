@@ -2079,8 +2079,7 @@ void comando_rename(int fd, struct ext2_super_block *sb, struct ext2_group_desc 
         return;
     }
 
-    // Se origem e destino estão em diretórios diferentes, a funcionalidade de mover não está implementada.
-    fprintf(stderr, "rename: não é possível mover entre diretórios diferentes ainda\n");
+    fprintf(stderr, "rename: não é possível mover entre diretórios diferentes\n");
     return;
 }
 
