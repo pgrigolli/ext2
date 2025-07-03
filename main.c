@@ -588,11 +588,20 @@ uint32_t path_to_inode_number(int fd, const struct ext2_super_block *sb,
 // Implementa o comando 'ls', que lista o conteúdo de um diretório com detalhes adicionais.
 void comando_ls(int fd, const struct ext2_super_block *sb, 
                 const struct ext2_group_desc *bgdt, 
-                uint32_t diretorio_inode_num, const char* path_argumento) {
+                uint32_t diretorio_inode_num, char* path_argumento) {
     
     uint32_t inode_a_listar = diretorio_inode_num; // Inode padrão: diretório atual
     uint8_t tipo_resolvido = EXT2_FT_UNKNOWN;
 
+    while (*path_argumento != '\0' && (*path_argumento == ' ' || *path_argumento == '\t')) {
+        path_argumento++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_argumento);
+    if (len > 0 && path_argumento[len - 1] == '\n') {
+        path_argumento[len - 1] = '\0';
+    }
     if (path_argumento != NULL && strlen(path_argumento) > 0) {
         // Se um caminho for fornecido, resolve-o para obter o inode.
         inode_a_listar = path_to_inode_number(fd, sb, bgdt, diretorio_inode_num, path_argumento, &tipo_resolvido);
@@ -846,7 +855,17 @@ void comando_cat(int fd, const struct ext2_super_block *sb,
 // Implementa o comando 'attr', que exibe os atributos (metadados) de um arquivo ou diretório.
 void comando_attr(int fd, const struct ext2_super_block *sb, 
                   const struct ext2_group_desc *bgdt, 
-                  uint32_t diretorio_atual_inode_num, const char* path_alvo) {
+                  uint32_t diretorio_atual_inode_num, char* path_alvo) {
+
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
 
     if (path_alvo == NULL || strlen(path_alvo) == 0) {
         printf("attr: Caminho do arquivo ou diretório não especificado.\n");
@@ -982,8 +1001,18 @@ void comando_cd(int fd, const struct ext2_super_block *sb,
                 uint32_t *diretorio_atual_inode_num_ptr, 
                 char* diretorio_atual_str, 
                 size_t diretorio_atual_str_max_len,
-                const char* path_alvo) {
+                char* path_alvo) {
 
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
+    
     if (path_alvo == NULL || strlen(path_alvo) == 0) { // 'cd' sem argumentos vai para a raiz
         *diretorio_atual_inode_num_ptr = EXT2_ROOT_INO;
         strncpy(diretorio_atual_str, "/", diretorio_atual_str_max_len -1);
@@ -1118,8 +1147,18 @@ uint32_t allocate_inode(int fd, struct ext2_super_block *sb, struct ext2_group_d
 // Implementa o comando 'touch', que cria um novo arquivo vazio ou atualiza o timestamp de um existente.
 void comando_touch(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
                    uint32_t diretorio_atual_inode_num, char* diretorio_atual_str, 
-                   const char* path_alvo) {
+                   char* path_alvo) {
 
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
+    
     if (path_alvo == NULL || strlen(path_alvo) == 0) {
         printf("touch: Nome do arquivo não especificado.\n");
         return;
@@ -1366,8 +1405,18 @@ uint32_t allocate_data_block(int fd, struct ext2_super_block *sb, struct ext2_gr
 // Implementa o comando 'mkdir', que cria um novo diretório.
 void comando_mkdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
                    uint32_t diretorio_atual_inode_num, char* diretorio_atual_str, 
-                   const char* path_alvo) {
+                   char* path_alvo) {
 
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
+    
     if (path_alvo == NULL || strlen(path_alvo) == 0) {
         printf("mkdir: Nome do diretório não especificado.\n");
         return;
@@ -1641,8 +1690,18 @@ void deallocate_data_block(int fd, struct ext2_super_block *sb, struct ext2_grou
 
 // Implementa o comando 'rm' (remove arquivo), que deleta um arquivo regular.
 void comando_rm(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
-                uint32_t diretorio_atual_inode_num, const char* path_alvo) {
+                uint32_t diretorio_atual_inode_num, char* path_alvo) {
 
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
+    
     if (path_alvo == NULL || strlen(path_alvo) == 0) {
         printf("rm: Operando faltando\n");
         return;
@@ -1808,7 +1867,18 @@ void comando_rm(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgd
 
 // Implementa o comando 'rmdir', que remove um diretório vazio.
 void comando_rmdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
-                  uint32_t diretorio_atual_inode_num, const char* path_alvo) {
+                  uint32_t diretorio_atual_inode_num, char* path_alvo) {
+    
+    while (*path_alvo != '\0' && (*path_alvo == ' ' || *path_alvo == '\t')) {
+        path_alvo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_alvo);
+    if (len > 0 && path_alvo[len - 1] == '\n') {
+        path_alvo[len - 1] = '\0';
+    }
+    
     if (path_alvo == NULL || path_alvo[0] == '\0') {
         fprintf(stderr, "rmdir: caminho não especificado\n");
         return;
@@ -2302,30 +2372,30 @@ int main(int argc, char *argv[]) {
         if (strcmp(primeiro_token, "info") == 0) {
             comando_info(&sb);
         } else if (strcmp(primeiro_token, "ls") == 0) {
-            char *arg_path = strtok(NULL, " \t\n"); 
+            char *arg_path = primeiro_token + strlen(primeiro_token) + 1; 
             comando_ls(fd, &sb, bgdt, diretorio_atual_inode, arg_path);
         } else if (strcmp(primeiro_token, "cat") == 0) {
             char *arg_path_cat = primeiro_token + strlen(primeiro_token) + 1;
             comando_cat(fd, &sb, bgdt, diretorio_atual_inode, arg_path_cat);
         } else if (strcmp(primeiro_token, "attr") == 0) {
-            char *arg_path_attr = strtok(NULL, " \t\n");
+            char *arg_path_attr = primeiro_token + strlen(primeiro_token) + 1;
             comando_attr(fd, &sb, bgdt, diretorio_atual_inode, arg_path_attr);
         } else if (strcmp(primeiro_token, "pwd") == 0) {
             comando_pwd(diretorio_atual);
         } else if (strcmp(primeiro_token, "cd") == 0) {
-            char *arg_path_cd = strtok(NULL, " \t\n");
+            char *arg_path_cd = primeiro_token + strlen(primeiro_token) + 1;
             comando_cd(fd, &sb, bgdt, &diretorio_atual_inode, diretorio_atual, sizeof(diretorio_atual), arg_path_cd);
         } else if (strcmp(primeiro_token, "touch") == 0) {
-            char *arg_path_touch = strtok(NULL, " \t\n");
+            char *arg_path_touch = primeiro_token + strlen(primeiro_token) + 1;
             comando_touch(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_touch);
         } else if (strcmp(primeiro_token, "mkdir") == 0) {
-            char *arg_path_mkdir = strtok(NULL, " \t\n");
+            char *arg_path_mkdir = primeiro_token + strlen(primeiro_token) + 1;
             comando_mkdir(fd, &sb, bgdt, diretorio_atual_inode, diretorio_atual, arg_path_mkdir);
         } else if (strcmp(primeiro_token, "rm") == 0) {
-            char *arg_path_rm = strtok(NULL, " \t\n");
+            char *arg_path_rm = primeiro_token + strlen(primeiro_token) + 1;
             comando_rm(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rm);
         } else if (strcmp(primeiro_token, "rmdir") == 0) {
-            char *arg_path_rmdir = strtok(NULL, " \t\n");
+            char *arg_path_rmdir = primeiro_token + strlen(primeiro_token) + 1;
             comando_rmdir(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rmdir);
         } else if (strcmp(primeiro_token, "rename") == 0) {
             char *arg_path_origem = strtok(NULL, " \t\n");
