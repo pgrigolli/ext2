@@ -787,7 +787,17 @@ char* read_file_data(int fd, const struct ext2_super_block *sb,
 // Implementa o comando 'cat', que exibe o conteúdo de um arquivo.
 void comando_cat(int fd, const struct ext2_super_block *sb, 
                  const struct ext2_group_desc *bgdt, 
-                 uint32_t diretorio_atual_inode_num, const char* path_arquivo) {
+                 uint32_t diretorio_atual_inode_num, char* path_arquivo) {
+
+    while (*path_arquivo != '\0' && (*path_arquivo == ' ' || *path_arquivo == '\t')) {
+        path_arquivo++;
+    }
+
+    // Remove o caractere de nova linha (\n) do final.
+    size_t len = strlen(path_arquivo);
+    if (len > 0 && path_arquivo[len - 1] == '\n') {
+        path_arquivo[len - 1] = '\0';
+    }
 
     if (path_arquivo == NULL || strlen(path_arquivo) == 0) {
         printf("cat: Caminho do arquivo não especificado.\n");
@@ -1002,6 +1012,19 @@ void comando_cd(int fd, const struct ext2_super_block *sb,
     }
 
     *diretorio_atual_inode_num_ptr = novo_inode_num; // Atualiza o inode do diretório atual
+
+    if (strcmp(path_alvo, "..") == 0) {
+        // Só altera a string se não estiver já na raiz "/"
+        if (strlen(diretorio_atual_str) > 1) {
+            char *ultima_barra = strrchr(diretorio_atual_str, '/');
+            if (ultima_barra == diretorio_atual_str) {
+                *(ultima_barra + 1) = '\0';
+            } else if (ultima_barra != NULL) {
+                *ultima_barra = '\0';
+            }
+        }
+        return; 
+    }
 
     // Atualiza a string do diretório atual para o prompt
     char* path_normalizado;
@@ -2282,7 +2305,7 @@ int main(int argc, char *argv[]) {
             char *arg_path = strtok(NULL, " \t\n"); 
             comando_ls(fd, &sb, bgdt, diretorio_atual_inode, arg_path);
         } else if (strcmp(primeiro_token, "cat") == 0) {
-            char *arg_path_cat = strtok(NULL, " \t\n");
+            char *arg_path_cat = primeiro_token + strlen(primeiro_token) + 1;
             comando_cat(fd, &sb, bgdt, diretorio_atual_inode, arg_path_cat);
         } else if (strcmp(primeiro_token, "attr") == 0) {
             char *arg_path_attr = strtok(NULL, " \t\n");
