@@ -2035,10 +2035,45 @@ void comando_rmdir(int fd, struct ext2_super_block *sb, struct ext2_group_desc *
 // Implementa o comando 'rename', que renomeia um arquivo ou diretório.
 // Atualmente, suporta apenas renomear dentro do mesmo diretório.
 void comando_rename(int fd, struct ext2_super_block *sb, struct ext2_group_desc *bgdt,
-                   uint32_t diretorio_atual_inode_num, const char* path_origem, const char* path_destino) {
+                   uint32_t diretorio_atual_inode_num, char* paths) {
+    
+    
+    char* path_origem = NULL;
+    char* path_destino = NULL;
+
+    // Remove espaços e a nova linha do início e fim da string de argumentos completa
+    while (*paths && isspace((unsigned char)*paths)) paths++;
+    size_t len_total = strlen(paths);
+    if (len_total > 0 && paths[len_total - 1] == '\n') {
+        paths[len_total - 1] = '\0';
+    }
+
+    char delimitador = '\'';
+    char* inicio_origem = strchr(paths, delimitador);
+    if (inicio_origem) {
+        *inicio_origem = '\0'; // Corta a string no primeiro '
+        path_origem = inicio_origem + 1; // Origem começa
+        
+        char* fim_origem = strchr(path_origem, delimitador);
+        if (fim_origem) {
+            *fim_origem = '\0';
+            path_destino = fim_origem + 1;
+
+            // Limpa espaços antes do destino
+            while (*path_destino && isspace((unsigned char)*path_destino)) path_destino++;
+            
+            // Remove a última aspa do destino, se houver
+            if (*path_destino == delimitador) {
+                 path_destino++;
+                 char* fim_destino = strrchr(path_destino, delimitador);
+                 if (fim_destino) *fim_destino = '\0';
+            }
+        }
+    }
+
     if (path_origem == NULL || path_origem[0] == '\0' || 
         path_destino == NULL || path_destino[0] == '\0') {
-        fprintf(stderr, "rename: origem e destino devem ser especificados\n");
+        fprintf(stderr, "rename: erro de sintaxe. Uso correto: rename '<origem>' '<destino>'\n");
         return;
     }
 
@@ -2398,9 +2433,8 @@ int main(int argc, char *argv[]) {
             char *arg_path_rmdir = primeiro_token + strlen(primeiro_token) + 1;
             comando_rmdir(fd, &sb, bgdt, diretorio_atual_inode, arg_path_rmdir);
         } else if (strcmp(primeiro_token, "rename") == 0) {
-            char *arg_path_origem = strtok(NULL, " \t\n");
-            char *arg_path_destino = strtok(NULL, " \t\n");
-            comando_rename(fd, &sb, bgdt, diretorio_atual_inode, arg_path_origem, arg_path_destino);
+            char *arg_paths = primeiro_token + strlen(primeiro_token) + 1;
+            comando_rename(fd, &sb, bgdt, diretorio_atual_inode, arg_paths);
         } else if (strcmp(primeiro_token, "mv") == 0) {
             char *arg_path_origem = strtok(NULL, " \t\n");
             char *arg_path_destino = strtok(NULL, " \t\n");
