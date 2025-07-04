@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <ctype.h>
 #include <stdint.h> // For uint32_t, uint16_t
 #include <string.h> // Para strcmp, strrchr, etc.
 #include <sys/stat.h> // Para S_ISDIR, S_ISREG, etc. (usado na impressão do i_mode)
