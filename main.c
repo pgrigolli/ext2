@@ -1042,6 +1042,11 @@ void comando_cd(int fd, const struct ext2_super_block *sb,
 
     *diretorio_atual_inode_num_ptr = novo_inode_num; // Atualiza o inode do diretório atual
 
+    if (strcmp(path_alvo, ".") == 0) {
+        // Se o caminho é ".", não altera o diretório atual
+        return; 
+    } 
+
     if (strcmp(path_alvo, "..") == 0) {
         // Só altera a string se não estiver já na raiz "/"
         if (strlen(diretorio_atual_str) > 1) {
