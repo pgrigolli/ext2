@@ -5,7 +5,7 @@ Implementação do sistema de arquivos EXT2 para a matéria de Sistemas Operacio
 O objetivo do projeto consistiu na implementação de um shell e estruturas de dados para manipulação de uma imagem de um sistema de arquivos EXT2 em C.
 
 ## Implementação
-Dentro do arquivo `main.c` está a implementação do shell, junto de suas funções auxiliares e estruturas de dados. Além disso, forma implementados os comandos:
+Dentro do arquivo `main.c` está a implementação do shell, junto de suas funções auxiliares e estruturas de dados. Além disso, foram implementados os comandos:
 
 ### Comandos de Leitura
 - `info`: Exibe informações do superbloco (blocos, inodes, espaço livre, tamanho de blocos/inodes etc).
@@ -16,12 +16,12 @@ Dentro do arquivo `main.c` está a implementação do shell, junto de suas funç
 - `pwd`: Exibe o caminho absoluto do diretório atual.
 
 ### Comandos de Escrita e Modificação
-- `touch <file>`: Cria um novo arquivo vazio ou atualiza timestamps.
+- `touch <file>`: Cria um novo arquivo vazio.
 - `mkdir <dir>`: Cria um novo diretório.
 - `rm <file>`: Remove um arquivo regular.
 - `rmdir <dir>`: Remove um diretório vazio.
 - `rename <file> <newfilename>`: Renomeia um arquivo ou diretório.
-- `mv <source> <target>`: Move ou renomeia arquivos (dentro do mesmo diretório ou para um diretório existente).
+- `mv <source> <target>`: Move um arquivo da imagem para o sistema de arquivos do host.
 - `cp <source> <host-path>`: Copia um arquivo da imagem para o sistema de arquivos do host.
 
 ### Métodos Auxiliares e Estruturas de Dados
@@ -29,8 +29,8 @@ Dentro do arquivo `main.c` está a implementação do shell, junto de suas funç
 #### Structs
 - `ext2_super_block`: Super bloco do EXT2, estrutura que contém inúmeras informações sobre o sistema de arquivos e seu estado atual
 - `ext2_group_desc`: Descritor de um grupo de bloco
-- `ext2_inode`: Inode do EXT2, representa um arquivo ou diretório, contendo metadados de permissões, dono, etc...
-- `ext2_dir_entry_2`: Entrada de diretório do EXT2. Cada diretório contém várias estruturas dessas, com cada uma apontando para um arquivo ou diretório.
+- `ext2_inode`: Inode do EXT2, representa um arquivo ou diretório, contendo metadados de permissões, dono, etc
+- `ext2_dir_entry_2`: Entrada de diretório do EXT2. Cada diretório contém várias dessas estruturas, com cada uma apontando para um arquivo ou diretório.
 
 #### Métodos Auxiliares para lidar com leitura e escrita
 - `read_superblock()`, `write_superblock()`
