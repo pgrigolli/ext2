@@ -7,7 +7,7 @@ O objetivo do projeto consistiu na implementação de um shell e estruturas de d
 ## Implementação
 Dentro do arquivo `main.c` está a implementação do shell, junto de suas funções auxiliares e estruturas de dados. Além disso, forma implementados os comandos:
 
-### 📖 Comandos de Leitura
+### Comandos de Leitura
 - `info`: Exibe informações do superbloco (blocos, inodes, espaço livre, tamanho de blocos/inodes etc).
 - `ls [<path>]`: Lista arquivos e diretórios no caminho especificado.
 - `cat <file>`: Exibe o conteúdo de um arquivo.
@@ -15,7 +15,7 @@ Dentro do arquivo `main.c` está a implementação do shell, junto de suas funç
 - `cd <path>`: Altera o diretório de trabalho.
 - `pwd`: Exibe o caminho absoluto do diretório atual.
 
-### ✏️ Comandos de Escrita e Modificação
+### Comandos de Escrita e Modificação
 - `touch <file>`: Cria um novo arquivo vazio ou atualiza timestamps.
 - `mkdir <dir>`: Cria um novo diretório.
 - `rm <file>`: Remove um arquivo regular.
@@ -24,7 +24,7 @@ Dentro do arquivo `main.c` está a implementação do shell, junto de suas funç
 - `mv <source> <target>`: Move ou renomeia arquivos (dentro do mesmo diretório ou para um diretório existente).
 - `cp <source> <host-path>`: Copia um arquivo da imagem para o sistema de arquivos do host.
 
-### 💻 Métodos Auxiliares e Estruturas de Dados
+### Métodos Auxiliares e Estruturas de Dados
 
 #### Structs
 - `ext2_super_block`: Super bloco do EXT2, estrutura que contém inúmeras informações sobre o sistema de arquivos e seu estado atual
@@ -38,4 +38,43 @@ Dentro do arquivo `main.c` está a implementação do shell, junto de suas funç
 - `read_data_block()`, `write_data_block()`
 - `allocate_inode()`, `deallocate_inode()`
 - `allocate_data_block()`, `deallocate_data_block()`
+
+## Execução
+Para executar o shell EXT2, certifique-se de possuir os seguintes recursos:
+- Linguagem e Compilador C (preferencialmente o GCC)
+- Sistema Operacional compatível com POSIX
+
+Após isso, siga os seguintes comandos:
+
+Clone o repositório:
+```bash
+git clone https://github.com/pgrigolli/ext2.git
+```
+
+Navegue até a pasta:
+```bash
+cd \ext2
+```
+
+Compile utilizando a Makefile:
+```bash
+make
+```
+
+Inicie o sistema de arquivos EXT2:
+```bash
+.\ext2shell nome_da_sua_imagem.img
+```
+
+
+
+
+
+
+
+
+
+
+
+
 
